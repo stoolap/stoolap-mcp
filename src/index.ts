@@ -1159,54 +1159,38 @@ server.resource(
   }
 );
 
-// ========================== PROMPTS ==========================
+// ========================== SHARED HELPERS ==========================
 
-server.prompt(
-  "sql-assistant",
-  "Injects live database schema and complete Stoolap SQL reference (all data types, 130+ functions with signatures, all operators, join types, index types, window functions, CTEs, transactions, temporal queries, vector search, and known limitations). Attach to give the model full context.",
-  {},
-  async () => {
-    // Build live schema
-    let schemaText = "";
-    try {
-      const tables = await db.query("SHOW TABLES");
-      for (const row of tables) {
-        const name = String(Object.values(row)[0]);
-        const q = quoteId(name);
-        const ddlRows = await db.query(`SHOW CREATE TABLE ${q}`);
-        const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
-        const indexRows = await db.query(`SHOW INDEXES FROM ${q}`);
-        schemaText += `${ddl};\n`;
-        if (indexRows.length > 0) {
-          schemaText += `-- Indexes: ${JSON.stringify(indexRows)}\n`;
-        }
-        schemaText += "\n";
+async function buildSchemaText(): Promise<string> {
+  let schemaText = "";
+  try {
+    const tables = await db.query("SHOW TABLES");
+    for (const row of tables) {
+      const name = String(Object.values(row)[0]);
+      const q = quoteId(name);
+      const ddlRows = await db.query(`SHOW CREATE TABLE ${q}`);
+      const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
+      const indexRows = await db.query(`SHOW INDEXES FROM ${q}`);
+      schemaText += `${ddl};\n`;
+      if (indexRows.length > 0) {
+        schemaText += `-- Indexes: ${JSON.stringify(indexRows)}\n`;
       }
-      const views = await db.query("SHOW VIEWS");
-      for (const row of views) {
-        const name = String(Object.values(row)[0]);
-        const ddlRows = await db.query(`SHOW CREATE VIEW ${quoteId(name)}`);
-        const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
-        schemaText += `${ddl};\n\n`;
-      }
-    } catch {
-      schemaText = "(unable to read schema)\n";
+      schemaText += "\n";
     }
+    const views = await db.query("SHOW VIEWS");
+    for (const row of views) {
+      const name = String(Object.values(row)[0]);
+      const ddlRows = await db.query(`SHOW CREATE VIEW ${quoteId(name)}`);
+      const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
+      schemaText += `${ddl};\n\n`;
+    }
+  } catch {
+    schemaText = "(unable to read schema)\n";
+  }
+  return schemaText;
+}
 
-    return {
-      messages: [
-        {
-          role: "user" as const,
-          content: {
-            type: "text" as const,
-            text: `You are a SQL expert for a Stoolap database. Below is the live schema followed by the complete SQL reference. Write accurate, optimized queries using only supported features.
-
-## Current Database Schema
-
-\`\`\`sql
-${schemaText}\`\`\`
-
-## Stoolap SQL Reference
+const sqlReference = `## Stoolap SQL Reference
 
 ### Data Types
 | Type | Description | Notes |
@@ -1392,7 +1376,41 @@ ANALYZE table_name (collect optimizer statistics)
 - Recursive CTEs: max 10,000 iterations
 - GENERATE_SERIES: max 10,000,000 rows per call
 
-Use the available MCP tools: query, execute, execute_batch, explain, begin_transaction, transaction_execute, transaction_query, transaction_execute_batch, commit_transaction, rollback_transaction, savepoint, rollback_to_savepoint, release_savepoint, list_tables, list_views, describe_table, show_create_table, show_create_view, show_indexes, get_schema, create_table, create_index, create_view, alter_table, drop, analyze_table, vacuum, pragma, version, list_functions.`,
+Use the available MCP tools: query, execute, execute_batch, explain, begin_transaction, transaction_execute, transaction_query, transaction_execute_batch, commit_transaction, rollback_transaction, savepoint, rollback_to_savepoint, release_savepoint, list_tables, list_views, describe_table, show_create_table, show_create_view, show_indexes, get_schema, create_table, create_index, create_view, alter_table, drop, analyze_table, vacuum, pragma, version, list_functions.`;
+
+server.resource(
+  "sql-reference",
+  "stoolap://sql-reference",
+  { description: "Complete Stoolap SQL reference with live database schema: data types, 130+ functions, operators, joins, indexes, window functions, CTEs, transactions, temporal queries, vector search, and known limitations" },
+  async () => {
+    const schemaText = await buildSchemaText();
+    return {
+      contents: [
+        {
+          uri: "stoolap://sql-reference",
+          mimeType: "text/markdown",
+          text: `## Current Database Schema\n\n\`\`\`sql\n${schemaText}\`\`\`\n\n${sqlReference}`,
+        },
+      ],
+    };
+  }
+);
+
+// ========================== PROMPTS ==========================
+
+server.prompt(
+  "sql-assistant",
+  "Injects live database schema and complete Stoolap SQL reference (all data types, 130+ functions with signatures, all operators, join types, index types, window functions, CTEs, transactions, temporal queries, vector search, and known limitations). Attach to give the model full context.",
+  {},
+  async () => {
+    const schemaText = await buildSchemaText();
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: `You are a SQL expert for a Stoolap database. Below is the live schema followed by the complete SQL reference. Write accurate, optimized queries using only supported features.\n\n## Current Database Schema\n\n\`\`\`sql\n${schemaText}\`\`\`\n\n${sqlReference}`,
           },
         },
       ],

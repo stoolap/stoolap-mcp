@@ -121,12 +121,13 @@ For deeper reference (live schema + full function signatures), attach the `sql-a
 | URI | Description |
 |-----|-------------|
 | `stoolap://schema` | Full database schema with all tables, views, columns, indexes, and DDL statements |
+| `stoolap://sql-reference` | Live database schema plus complete Stoolap SQL reference: data types, 130+ functions with signatures, operators, joins, indexes, window functions, CTEs, transactions, temporal queries, vector search, and known limitations |
 
 ## Prompts
 
 | Prompt | Description |
 |--------|-------------|
-| `sql-assistant` | Injects the live database schema and a complete Stoolap SQL reference (data types, all 130+ functions with signatures, operators, index types, join types, window functions, CTEs, transactions, EXPLAIN, PRAGMA, and known limitations). Provides deeper detail than the auto-injected instructions. |
+| `sql-assistant` | Same content as `stoolap://sql-reference` delivered as an MCP prompt. Use whichever your client supports. |
 
 ## SQL Coverage
 
