@@ -14,10 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Database } from "@stoolap/node";
+
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require("../package.json");
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -79,7 +83,10 @@ function json(data: unknown): ToolResult {
 }
 
 function readOnlyErr(): ToolResult {
-  return { content: [{ type: "text", text: "Error: server is in read-only mode" }], isError: true };
+  return {
+    content: [{ type: "text", text: "Error: server is in read-only mode" }],
+    isError: true,
+  };
 }
 
 // Single-pass sanitizer: strips string literals, block comments, and line
@@ -137,7 +144,15 @@ function rejectMultiStatement(sql: string): ToolResult | null {
   // Remove trailing whitespace and optional trailing semicolons
   const trimmed = cleaned.replace(/[\s;]+$/, "");
   if (trimmed.includes(";")) {
-    return { content: [{ type: "text", text: "Error: multiple SQL statements are not allowed. Send one statement at a time." }], isError: true };
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Error: multiple SQL statements are not allowed. Send one statement at a time.",
+        },
+      ],
+      isError: true,
+    };
   }
   return null;
 }
@@ -164,7 +179,9 @@ function effectiveKeyword(sql: string): string {
 
 function isDDL(sql: string): boolean {
   const kw = firstKeyword(sql);
-  return kw === "CREATE" || kw === "DROP" || kw === "ALTER" || kw === "TRUNCATE";
+  return (
+    kw === "CREATE" || kw === "DROP" || kw === "ALTER" || kw === "TRUNCATE"
+  );
 }
 
 function hasReturning(sql: string): boolean {
@@ -180,7 +197,10 @@ function quoteId(name: string): string {
 // that are spliced into SQL without quoting)
 function requireBareId(name: string, label: string): ToolResult | null {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-    return { content: [{ type: "text", text: `Error: invalid ${label}: ${name}` }], isError: true };
+    return {
+      content: [{ type: "text", text: `Error: invalid ${label}: ${name}` }],
+      isError: true,
+    };
   }
   return null;
 }
@@ -189,12 +209,22 @@ function requireBareId(name: string, label: string): ToolResult | null {
 function isWrite(sql: string): boolean {
   const kw = effectiveKeyword(sql);
   if (
-    kw === "INSERT" || kw === "UPDATE" || kw === "DELETE" ||
-    kw === "CREATE" || kw === "DROP" || kw === "ALTER" || kw === "TRUNCATE" ||
-    kw === "VACUUM" || kw === "ANALYZE" || kw === "PRAGMA" || kw === "SET"
-  ) return true;
+    kw === "INSERT" ||
+    kw === "UPDATE" ||
+    kw === "DELETE" ||
+    kw === "CREATE" ||
+    kw === "DROP" ||
+    kw === "ALTER" ||
+    kw === "TRUNCATE" ||
+    kw === "VACUUM" ||
+    kw === "ANALYZE" ||
+    kw === "PRAGMA" ||
+    kw === "SET"
+  )
+    return true;
   // WITH ... INSERT/UPDATE/DELETE (CTE-based DML)
-  if (kw === "WITH" && /\)\s*(INSERT|UPDATE|DELETE)\b/i.test(sanitizeSql(sql))) return true;
+  if (kw === "WITH" && /\)\s*(INSERT|UPDATE|DELETE)\b/i.test(sanitizeSql(sql)))
+    return true;
   return false;
 }
 
@@ -203,26 +233,44 @@ function isWrite(sql: string): boolean {
 function isReadQuery(sql: string): boolean {
   const kw = effectiveKeyword(sql);
   if (
-    kw === "SELECT" || kw === "SHOW" || kw === "DESCRIBE" ||
-    kw === "DESC" || kw === "EXPLAIN" || kw === "VALUES"
-  ) return true;
+    kw === "SELECT" ||
+    kw === "SHOW" ||
+    kw === "DESCRIBE" ||
+    kw === "DESC" ||
+    kw === "EXPLAIN" ||
+    kw === "VALUES"
+  )
+    return true;
   // WITH ... SELECT (CTE query) — allowed only when the main statement is NOT a write
   if (kw === "WITH") return !isWrite(sql);
   return false;
 }
 
 function txActiveErr(): ToolResult {
-  return { content: [{ type: "text", text: "Error: a transaction is active. Use transaction_execute/transaction_query within a transaction, or commit/rollback first." }], isError: true };
+  return {
+    content: [
+      {
+        type: "text",
+        text: "Error: a transaction is active. Use transaction_execute/transaction_query within a transaction, or commit/rollback first.",
+      },
+    ],
+    isError: true,
+  };
 }
 
 // Param schemas
 const paramsSchema = z
   .union([
     z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])),
-    z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])),
+    z.record(
+      z.string(),
+      z.union([z.string(), z.number(), z.boolean(), z.null()]),
+    ),
   ])
   .optional()
-  .describe("Parameters: array for positional ($1, $2, ...) or object for named (:key) binding");
+  .describe(
+    "Parameters: array for positional ($1, $2, ...) or object for named (:key) binding",
+  );
 
 // ---------------------------------------------------------------------------
 // MCP Server
@@ -231,7 +279,7 @@ const paramsSchema = z
 const server = new McpServer(
   {
     name: "stoolap",
-    version: "0.1.0",
+    version: PKG_VERSION,
   },
   {
     instructions: `Stoolap is an embedded SQL database. Use the provided MCP tools to interact with it.
@@ -270,7 +318,7 @@ Limitations (do NOT attempt these):
 - Use "get_schema" or "describe_table" to inspect the database before writing queries.
 - Use "list_functions" to see all available SQL functions with signatures.
 - Attach the "sql-assistant" prompt for the complete reference with the live schema.`,
-  }
+  },
 );
 
 // ========================== QUERY & EXECUTE TOOLS ==========================
@@ -283,7 +331,15 @@ server.tool(
     const multiErr = rejectMultiStatement(sql);
     if (multiErr) return multiErr;
     if (!isReadQuery(sql)) {
-      return { content: [{ type: "text", text: "Error: query tool only accepts read-only statements (SELECT, SHOW, DESCRIBE, EXPLAIN). Use the execute tool for writes." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: query tool only accepts read-only statements (SELECT, SHOW, DESCRIBE, EXPLAIN). Use the execute tool for writes.",
+          },
+        ],
+        isError: true,
+      };
     }
     try {
       const rows = await db.query(sql, params);
@@ -291,7 +347,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -318,7 +374,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -341,7 +397,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -349,7 +405,10 @@ server.tool(
   "Show the query execution plan. Use analyze=true to run the query and show actual runtime statistics (row counts, timing, join algorithm chosen).",
   {
     sql: z.string().describe("SQL query to explain"),
-    analyze: z.boolean().optional().describe("If true, use EXPLAIN ANALYZE (executes the query)"),
+    analyze: z
+      .boolean()
+      .optional()
+      .describe("If true, use EXPLAIN ANALYZE (executes the query)"),
     params: paramsSchema,
   },
   async ({ sql, analyze, params }) => {
@@ -357,7 +416,15 @@ server.tool(
     if (multiErr) return multiErr;
     if (readOnly && isWrite(sql)) return readOnlyErr();
     if (analyze && isWrite(sql)) {
-      return { content: [{ type: "text", text: "Error: EXPLAIN ANALYZE on write statements (INSERT/UPDATE/DELETE/DDL) executes the statement and mutates data. Use EXPLAIN (without analyze) to inspect the plan, or use the execute tool to run the statement." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: EXPLAIN ANALYZE on write statements (INSERT/UPDATE/DELETE/DDL) executes the statement and mutates data. Use EXPLAIN (without analyze) to inspect the plan, or use the execute tool to run the statement.",
+          },
+        ],
+        isError: true,
+      };
     }
     try {
       const prefix = analyze ? "EXPLAIN ANALYZE" : "EXPLAIN";
@@ -366,7 +433,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 // ========================== TRANSACTION TOOLS ==========================
@@ -382,7 +449,15 @@ server.tool(
   },
   async ({ isolation }) => {
     if (sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: a transaction is already active. Commit or rollback first." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: a transaction is already active. Commit or rollback first.",
+          },
+        ],
+        isError: true,
+      };
     }
     try {
       if (isolation === "snapshot") {
@@ -391,12 +466,14 @@ server.tool(
         db.execSync("BEGIN TRANSACTION");
       }
       sqlTxActive = true;
-      return ok(`Transaction started (isolation: ${isolation ?? "read_committed"})`);
+      return ok(
+        `Transaction started (isolation: ${isolation ?? "read_committed"})`,
+      );
     } catch (e) {
       sqlTxActive = false;
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -407,11 +484,27 @@ server.tool(
     const multiErr = rejectMultiStatement(sql);
     if (multiErr) return multiErr;
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction. Call begin_transaction first." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: no active transaction. Call begin_transaction first.",
+          },
+        ],
+        isError: true,
+      };
     }
     if (readOnly && isWrite(sql)) return readOnlyErr();
     if (isDDL(sql)) {
-      return { content: [{ type: "text", text: "Error: DDL (CREATE/ALTER/DROP/TRUNCATE) is auto-committed and cannot run inside a transaction. Use the execute tool outside a transaction instead." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: DDL (CREATE/ALTER/DROP/TRUNCATE) is auto-committed and cannot run inside a transaction. Use the execute tool outside a transaction instead.",
+          },
+        ],
+        isError: true,
+      };
     }
     try {
       if (hasReturning(sql)) {
@@ -423,7 +516,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -434,10 +527,26 @@ server.tool(
     const multiErr = rejectMultiStatement(sql);
     if (multiErr) return multiErr;
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction. Call begin_transaction first." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: no active transaction. Call begin_transaction first.",
+          },
+        ],
+        isError: true,
+      };
     }
     if (!isReadQuery(sql)) {
-      return { content: [{ type: "text", text: "Error: transaction_query only accepts read-only statements. Use transaction_execute for writes." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: transaction_query only accepts read-only statements. Use transaction_execute for writes.",
+          },
+        ],
+        isError: true,
+      };
     }
     try {
       const rows = db.querySync(sql, params);
@@ -445,7 +554,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -461,7 +570,15 @@ server.tool(
     const multiErr = rejectMultiStatement(sql);
     if (multiErr) return multiErr;
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction. Call begin_transaction first." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: no active transaction. Call begin_transaction first.",
+          },
+        ],
+        isError: true,
+      };
     }
     if (readOnly) return readOnlyErr();
     try {
@@ -474,7 +591,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -483,7 +600,10 @@ server.tool(
   {},
   async () => {
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction" }], isError: true };
+      return {
+        content: [{ type: "text", text: "Error: no active transaction" }],
+        isError: true,
+      };
     }
     try {
       db.execSync("COMMIT");
@@ -493,7 +613,7 @@ server.tool(
       sqlTxActive = false;
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -502,7 +622,10 @@ server.tool(
   {},
   async () => {
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction" }], isError: true };
+      return {
+        content: [{ type: "text", text: "Error: no active transaction" }],
+        isError: true,
+      };
     }
     try {
       db.execSync("ROLLBACK");
@@ -512,7 +635,7 @@ server.tool(
       sqlTxActive = false;
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -521,7 +644,15 @@ server.tool(
   { name: z.string().describe("Savepoint name") },
   async ({ name }) => {
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction. Call begin_transaction first." }], isError: true };
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: no active transaction. Call begin_transaction first.",
+          },
+        ],
+        isError: true,
+      };
     }
     const err = requireBareId(name, "savepoint name");
     if (err) return err;
@@ -531,7 +662,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -540,7 +671,10 @@ server.tool(
   { name: z.string().describe("Savepoint name") },
   async ({ name }) => {
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction." }], isError: true };
+      return {
+        content: [{ type: "text", text: "Error: no active transaction." }],
+        isError: true,
+      };
     }
     const err = requireBareId(name, "savepoint name");
     if (err) return err;
@@ -550,7 +684,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -559,7 +693,10 @@ server.tool(
   { name: z.string().describe("Savepoint name") },
   async ({ name }) => {
     if (!sqlTxActive) {
-      return { content: [{ type: "text", text: "Error: no active transaction." }], isError: true };
+      return {
+        content: [{ type: "text", text: "Error: no active transaction." }],
+        isError: true,
+      };
     }
     const err = requireBareId(name, "savepoint name");
     if (err) return err;
@@ -569,40 +706,32 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 // ========================== SCHEMA INSPECTION TOOLS ==========================
 
-server.tool(
-  "list_tables",
-  "List all tables in the database.",
-  {},
-  async () => {
-    try {
-      const rows = await db.query("SHOW TABLES");
-      const tables = rows.map((r: Record<string, unknown>) => Object.values(r)[0]);
-      return json(tables);
-    } catch (e) {
-      return fail(e);
-    }
+server.tool("list_tables", "List all tables in the database.", {}, async () => {
+  try {
+    const rows = await db.query("SHOW TABLES");
+    const tables = rows.map(
+      (r: Record<string, unknown>) => Object.values(r)[0],
+    );
+    return json(tables);
+  } catch (e) {
+    return fail(e);
   }
-);
+});
 
-server.tool(
-  "list_views",
-  "List all views in the database.",
-  {},
-  async () => {
-    try {
-      const rows = await db.query("SHOW VIEWS");
-      const views = rows.map((r: Record<string, unknown>) => Object.values(r)[0]);
-      return json(views);
-    } catch (e) {
-      return fail(e);
-    }
+server.tool("list_views", "List all views in the database.", {}, async () => {
+  try {
+    const rows = await db.query("SHOW VIEWS");
+    const views = rows.map((r: Record<string, unknown>) => Object.values(r)[0]);
+    return json(views);
+  } catch (e) {
+    return fail(e);
   }
-);
+});
 
 server.tool(
   "describe_table",
@@ -615,7 +744,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -629,7 +758,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -643,7 +772,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -657,7 +786,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -667,7 +796,10 @@ server.tool(
   async () => {
     try {
       const tables = await db.query("SHOW TABLES");
-      const schema: Record<string, { columns: unknown; indexes: unknown; ddl: unknown }> = {};
+      const schema: Record<
+        string,
+        { columns: unknown; indexes: unknown; ddl: unknown }
+      > = {};
       for (const row of tables) {
         const name = String(Object.values(row)[0]);
         const q = quoteId(name);
@@ -687,16 +819,28 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 // ========================== SCHEMA MODIFICATION TOOLS ==========================
 
 // Validate that the SQL statement starts with one of the expected keywords
-function requireKeyword(sql: string, allowed: string[], toolName: string): ToolResult | null {
+function requireKeyword(
+  sql: string,
+  allowed: string[],
+  toolName: string,
+): ToolResult | null {
   const kw = firstKeyword(sql);
   if (!allowed.includes(kw)) {
-    return { content: [{ type: "text", text: `Error: the ${toolName} tool only accepts ${allowed.join("/")} statements. Got: ${kw}` }], isError: true };
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: the ${toolName} tool only accepts ${allowed.join("/")} statements. Got: ${kw}`,
+        },
+      ],
+      isError: true,
+    };
   }
   return null;
 }
@@ -716,7 +860,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -734,7 +878,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -752,7 +896,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -770,7 +914,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -788,7 +932,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 // ========================== ADMIN TOOLS ==========================
@@ -806,13 +950,18 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
   "vacuum",
   "Clean up deleted rows, old MVCC versions, and compact indexes. Can target a specific table or the entire database. Note: destroys time-travel history.",
-  { table: z.string().optional().describe("Table name (omit for entire database)") },
+  {
+    table: z
+      .string()
+      .optional()
+      .describe("Table name (omit for entire database)"),
+  },
   async ({ table }) => {
     if (readOnly) return readOnlyErr();
     if (sqlTxActive) return txActiveErr();
@@ -822,7 +971,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 // PRAGMAs that perform write actions even without a value parameter
@@ -833,19 +982,31 @@ server.tool(
   "Get or set database configuration. Readable/writable: sync_mode (0=None, 1=Normal, 2=Full), snapshot_interval (seconds), keep_snapshots (count), wal_flush_trigger (bytes). Action-only: snapshot (manual snapshot), checkpoint (alias), vacuum (returns cleanup stats). Additional options available via connection string DSN.",
   {
     name: z.string().describe("PRAGMA name"),
-    value: z.union([z.string(), z.number()]).optional().describe("Value to set (omit to read current value)"),
+    value: z
+      .union([z.string(), z.number()])
+      .optional()
+      .describe("Value to set (omit to read current value)"),
   },
   async ({ name, value }) => {
     const err = requireBareId(name, "pragma name");
     if (err) return err;
-    if (readOnly && (value !== undefined || writePragmas.has(name.toLowerCase()))) return readOnlyErr();
+    if (
+      readOnly &&
+      (value !== undefined || writePragmas.has(name.toLowerCase()))
+    )
+      return readOnlyErr();
     if (sqlTxActive) return txActiveErr();
     try {
       if (value !== undefined) {
         // Validate that numeric values are actually numbers to prevent injection
         const numValue = Number(value);
         if (isNaN(numValue)) {
-          return { content: [{ type: "text", text: `Error: pragma value must be numeric` }], isError: true };
+          return {
+            content: [
+              { type: "text", text: `Error: pragma value must be numeric` },
+            ],
+            isError: true,
+          };
         }
         await db.exec(`PRAGMA ${name} = ${numValue}`);
         return ok(`PRAGMA ${name} set to ${numValue}`);
@@ -855,7 +1016,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -869,7 +1030,7 @@ server.tool(
     } catch (e) {
       return fail(e);
     }
-  }
+  },
 );
 
 server.tool(
@@ -877,7 +1038,20 @@ server.tool(
   "List all available SQL functions grouped by category with signatures and descriptions.",
   {
     category: z
-      .enum(["all", "aggregate", "window", "string", "math", "datetime", "json", "hash", "conditional", "type", "vector", "system"])
+      .enum([
+        "all",
+        "aggregate",
+        "window",
+        "string",
+        "math",
+        "datetime",
+        "json",
+        "hash",
+        "conditional",
+        "type",
+        "vector",
+        "system",
+      ])
       .optional()
       .describe("Filter by category (default: all)"),
   },
@@ -1112,8 +1286,11 @@ Also available as scalar: SELECT GENERATE_SERIES(1, 5) returns JSON array [1,2,3
     if (sections[cat]) {
       return ok(sections[cat]);
     }
-    return { content: [{ type: "text", text: `Error: unknown category '${cat}'` }], isError: true };
-  }
+    return {
+      content: [{ type: "text", text: `Error: unknown category '${cat}'` }],
+      isError: true,
+    };
+  },
 );
 
 // ========================== RESOURCES ==========================
@@ -1121,7 +1298,10 @@ Also available as scalar: SELECT GENERATE_SERIES(1, 5) returns JSON array [1,2,3
 server.resource(
   "schema",
   "stoolap://schema",
-  { description: "Full database schema with all tables, views, columns, indexes, and DDL" },
+  {
+    description:
+      "Full database schema with all tables, views, columns, indexes, and DDL",
+  },
   async () => {
     try {
       const tables = await db.query("SHOW TABLES");
@@ -1146,17 +1326,27 @@ server.resource(
           {
             uri: "stoolap://schema",
             mimeType: "application/json",
-            text: JSON.stringify({ tables: schema, views: viewSchema }, null, 2),
+            text: JSON.stringify(
+              { tables: schema, views: viewSchema },
+              null,
+              2,
+            ),
           },
         ],
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return {
-        contents: [{ uri: "stoolap://schema", mimeType: "text/plain", text: `Error: ${msg}` }],
+        contents: [
+          {
+            uri: "stoolap://schema",
+            mimeType: "text/plain",
+            text: `Error: ${msg}`,
+          },
+        ],
       };
     }
-  }
+  },
 );
 
 // ========================== SHARED HELPERS ==========================
@@ -1169,7 +1359,9 @@ async function buildSchemaText(): Promise<string> {
       const name = String(Object.values(row)[0]);
       const q = quoteId(name);
       const ddlRows = await db.query(`SHOW CREATE TABLE ${q}`);
-      const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
+      const ddl = ddlRows[0]
+        ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0])
+        : `-- ${name}`;
       const indexRows = await db.query(`SHOW INDEXES FROM ${q}`);
       schemaText += `${ddl};\n`;
       if (indexRows.length > 0) {
@@ -1181,7 +1373,9 @@ async function buildSchemaText(): Promise<string> {
     for (const row of views) {
       const name = String(Object.values(row)[0]);
       const ddlRows = await db.query(`SHOW CREATE VIEW ${quoteId(name)}`);
-      const ddl = ddlRows[0] ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0]) : `-- ${name}`;
+      const ddl = ddlRows[0]
+        ? String(Object.values(ddlRows[0])[1] ?? Object.values(ddlRows[0])[0])
+        : `-- ${name}`;
       schemaText += `${ddl};\n\n`;
     }
   } catch {
@@ -1381,7 +1575,10 @@ Use the available MCP tools: query, execute, execute_batch, explain, begin_trans
 server.resource(
   "sql-reference",
   "stoolap://sql-reference",
-  { description: "Complete Stoolap SQL reference with live database schema: data types, 130+ functions, operators, joins, indexes, window functions, CTEs, transactions, temporal queries, vector search, and known limitations" },
+  {
+    description:
+      "Complete Stoolap SQL reference with live database schema: data types, 130+ functions, operators, joins, indexes, window functions, CTEs, transactions, temporal queries, vector search, and known limitations",
+  },
   async () => {
     const schemaText = await buildSchemaText();
     return {
@@ -1393,7 +1590,7 @@ server.resource(
         },
       ],
     };
-  }
+  },
 );
 
 // ========================== PROMPTS ==========================
@@ -1415,7 +1612,7 @@ server.prompt(
         },
       ],
     };
-  }
+  },
 );
 
 // ---------------------------------------------------------------------------
@@ -1432,7 +1629,9 @@ function shutdown() {
       db.execSync("ROLLBACK");
       sqlTxActive = false;
     }
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
   db.closeSync();
   process.exit(0);
 }
