@@ -9,7 +9,7 @@ permissions:
   id-token: write
 
 jobs:
-  build:
+  test:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
@@ -20,18 +20,15 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Build
-        run: npm run build
-
-      - name: Verify built output exists
-        run: test -f build/index.js
+      - name: Build and test
+        run: npm test
 
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: build
+    needs: test
     steps:
       - uses: actions/checkout@v4
 
@@ -40,16 +37,29 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Install dependencies
-        run: npm install
+      - name: Upgrade npm for trusted publishing (OIDC)
+        run: npm install -g npm@latest
 
-      - name: Build
-        run: npm run build
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package version
+        run: |
+          ver=$(node -p "require('./package.json').version")
+          if [ "v$ver" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version $ver"
+            exit 1
+          fi
 
       - name: Publish
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          ver=$(node -p "require('./package.json').version")
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "Skipping $name@$ver (already published)"
+          else
+            npm publish --access public --provenance
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

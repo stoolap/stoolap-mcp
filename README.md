@@ -4,6 +4,8 @@ MCP (Model Context Protocol) server for [Stoolap](https://github.com/stoolap/sto
 
 Works with any MCP-compatible AI client: Claude Desktop, Claude Code, Cursor, Windsurf, Cline, and others.
 
+Version 0.4.x of this server targets the Stoolap 0.4.x engine (volume-based storage) through [`@stoolap/node`](https://github.com/stoolap/stoolap-node).
+
 ## Quick Start
 
 ### Claude Desktop
@@ -53,30 +55,42 @@ claude mcp add stoolap -- npx -y @stoolap/mcp --path ./mydata
 }
 ```
 
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--path <path>` | `:memory:` | Database path or DSN. Engine options go in the query string, e.g. `./mydata?sync_mode=full&checkpoint_interval=30`. |
+| `--read-only` | `false` | Reject every statement that writes data, schema or engine state. Read-only transactions (begin, query, commit) are still allowed for consistent reads. |
+| `--version` | | Print the server version and exit. |
+
+The first `npx` run compiles the small native addon of `@stoolap/node`, which can take a while; MCP clients with a short startup timeout may report a failed connection on that first run. Retry once the install has finished, or install the package globally beforehand (`npm install -g @stoolap/mcp`).
+
 ## Tools (30)
+
+Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so clients can auto-approve the read-only ones.
 
 ### Query and Analysis
 
 | Tool | Description |
 |------|-------------|
-| `query` | Run SELECT, SHOW, DESCRIBE queries. Supports JOINs, CTEs, window functions, subqueries, set operations, JSON operators, vector search, temporal queries (AS OF), and all aggregate/scalar functions. Returns results as JSON. |
-| `execute` | Run INSERT, UPDATE, DELETE with parameter binding ($1, $2, ...). Supports ON DUPLICATE KEY UPDATE (upsert), RETURNING clause, and expression-based updates. Returns affected row count. |
-| `execute_batch` | Execute the same SQL with multiple parameter sets in a single atomic transaction. Parses SQL once, reuses for every row. All rows succeed or all are rolled back. |
-| `explain` | Show query execution plan. Set analyze=true to run the query and show actual runtime stats (row counts, timing, join algorithms). |
+| `query` | Run SELECT, SHOW, DESCRIBE, EXPLAIN, VALUES and WITH ... SELECT. Returns rows as JSON. Runs inside the active transaction if one is open. |
+| `execute` | Run INSERT, UPDATE, DELETE, COPY ... FROM, DDL, SET, ANALYZE, VACUUM with parameter binding. Supports upsert (ON CONFLICT / ON DUPLICATE KEY UPDATE) and RETURNING. Returns rows for RETURNING, otherwise the affected row count. |
+| `execute_batch` | Execute the same SQL with multiple parameter sets in a single atomic transaction. |
+| `explain` | Show the query plan. `analyze=true` runs the statement and reports actual row counts and timings (refused for write statements). |
 
 ### Transaction Control
 
 | Tool | Description |
 |------|-------------|
-| `begin_transaction` | Begin a new transaction with optional isolation level (read_committed or snapshot). Only one active transaction at a time. |
-| `transaction_execute` | Execute a DML statement within the active transaction. Sees uncommitted changes. Supports RETURNING clause. |
-| `transaction_query` | Run a SELECT query within the active transaction. Sees uncommitted changes. Supports aggregates, JOINs, GROUP BY, window functions, CTEs, and subqueries. |
-| `transaction_execute_batch` | Execute the same SQL with multiple parameter sets within the active transaction. |
-| `commit_transaction` | Commit the active transaction. All changes become permanent. |
-| `rollback_transaction` | Rollback the active transaction. All changes are discarded. |
-| `savepoint` | Create a named savepoint within the active transaction. |
-| `rollback_to_savepoint` | Rollback to a savepoint, undoing changes after it without aborting the transaction. |
-| `release_savepoint` | Release (remove) a savepoint. Changes are kept. |
+| `begin_transaction` | Begin a transaction with optional isolation level (`read_committed` or `snapshot`). One active transaction at a time. |
+| `transaction_execute` | Execute INSERT, UPDATE or DELETE inside the active transaction. DDL, TRUNCATE and COPY are refused. |
+| `transaction_query` | Run a read-only statement inside the active transaction. |
+| `transaction_execute_batch` | Execute the same SQL with multiple parameter sets inside the active transaction. |
+| `commit_transaction` | Commit the active transaction. |
+| `rollback_transaction` | Rollback the active transaction. |
+| `savepoint` | Create a named savepoint. |
+| `rollback_to_savepoint` | Undo changes made after a savepoint without ending the transaction. |
+| `release_savepoint` | Remove a savepoint, keeping its changes. |
 
 ### Schema Inspection
 
@@ -84,44 +98,44 @@ claude mcp add stoolap -- npx -y @stoolap/mcp --path ./mydata
 |------|-------------|
 | `list_tables` | List all tables |
 | `list_views` | List all views |
-| `describe_table` | Show columns, types, nullability, keys, defaults, and extras (AUTO_INCREMENT, foreign keys) |
-| `show_create_table` | Get the full CREATE TABLE DDL including all constraints |
-| `show_create_view` | Get the full CREATE VIEW DDL |
-| `show_indexes` | Show all indexes on a table (type, columns, uniqueness) |
-| `get_schema` | Get the complete database schema: all tables with columns, indexes, DDL, plus all views |
+| `describe_table` | Columns, types, nullability, keys, defaults and extras |
+| `show_create_table` | Full CREATE TABLE DDL including constraints and foreign keys |
+| `show_create_view` | Full CREATE VIEW DDL |
+| `show_indexes` | Indexes of a table: name, type, columns, uniqueness, options |
+| `get_schema` | The complete schema: every table with columns, indexes and DDL, plus every view |
 
 ### Schema Modification
 
 | Tool | Description |
 |------|-------------|
-| `create_table` | Create a table with INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N) columns. Supports PRIMARY KEY, NOT NULL, UNIQUE, DEFAULT, CHECK, AUTO_INCREMENT, REFERENCES (foreign keys), IF NOT EXISTS, and CREATE TABLE AS SELECT. |
-| `create_index` | Create BTREE, HASH, BITMAP, or HNSW indexes. Supports UNIQUE and composite (multi-column). HNSW accepts m, ef_construction, ef_search, metric (l2/cosine/ip) params. |
-| `create_view` | Create a read-only view (persists across restarts) |
-| `alter_table` | ADD COLUMN, DROP COLUMN, RENAME COLUMN, MODIFY COLUMN (change type), RENAME TO |
-| `drop` | Drop a table, view, or index (supports IF EXISTS) |
+| `create_table` | INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N) columns; PRIMARY KEY (including composite), NOT NULL, UNIQUE, DEFAULT, CHECK, AUTO_INCREMENT, single-column foreign keys; IF NOT EXISTS; CREATE TABLE AS SELECT |
+| `create_index` | BTREE, HASH, BITMAP or HNSW indexes, UNIQUE and composite. HNSW options: m, ef_construction, ef_search, metric |
+| `create_view` | Read-only view that persists across restarts |
+| `alter_table` | ADD COLUMN, DROP COLUMN, RENAME COLUMN, MODIFY COLUMN, RENAME TO |
+| `drop` | DROP TABLE / VIEW / INDEX ... ON table (supports IF EXISTS) |
 
 ### Database Administration
 
 | Tool | Description |
 |------|-------------|
-| `analyze_table` | Collect optimizer statistics (histograms, distinct counts, min/max) for better query plans |
-| `vacuum` | Clean up deleted rows, old MVCC versions, and compact indexes |
-| `pragma` | Get/set database config: sync_mode, snapshot_interval, keep_snapshots, wal_flush_trigger. Trigger manual snapshot or vacuum. |
-| `version` | Get the Stoolap engine version |
-| `list_functions` | List all 130+ built-in SQL functions with signatures, grouped by category (aggregate, window, string, math, datetime, json, hash, conditional, type, vector, system) |
+| `analyze_table` | Collect optimizer statistics for a table |
+| `vacuum` | Remove deleted rows and old MVCC versions, compact indexes (discards time-travel history) |
+| `pragma` | Read or set `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`; read `sync_mode`, `wal_flush_trigger`, `volume_stats`; run `snapshot`, `checkpoint`, `vacuum`, `restore` |
+| `version` | Engine and server version |
+| `list_functions` | All built-in SQL functions with signatures, grouped by category |
 
 ## Auto-injected Instructions
 
-The server provides built-in [MCP instructions](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/instructions) that are automatically sent to the AI during the connection handshake. This means any AI client receives a comprehensive Stoolap SQL reference on connect, covering data types, supported syntax, all operator categories, index types, vector search, transaction isolation levels, and known limitations, without the user needing to configure anything. The AI can write correct Stoolap SQL from the first query.
+The server sends [MCP instructions](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/instructions) during the connection handshake, so any AI client receives a compact Stoolap SQL reference on connect: data types, tool routing, upsert syntax, index and vector rules, transaction rules, and the known limitations of the 0.4.x engine.
 
-For deeper reference (live schema + full function signatures), attach the `sql-assistant` prompt.
+For the full reference with the live schema, attach the `sql-assistant` prompt or read `stoolap://sql-reference`.
 
 ## Resources
 
 | URI | Description |
 |-----|-------------|
-| `stoolap://schema` | Full database schema with all tables, views, columns, indexes, and DDL statements |
-| `stoolap://sql-reference` | Live database schema plus complete Stoolap SQL reference: data types, 130+ functions with signatures, operators, joins, indexes, window functions, CTEs, transactions, temporal queries, vector search, and known limitations |
+| `stoolap://schema` | Full database schema with all tables, views, columns, indexes, and DDL statements (JSON) |
+| `stoolap://sql-reference` | Live database schema plus the complete Stoolap SQL reference (Markdown) |
 
 ## Prompts
 
@@ -131,46 +145,48 @@ For deeper reference (live schema + full function signatures), attach the `sql-a
 
 ## SQL Coverage
 
-The MCP server exposes the full Stoolap SQL surface through the `query` and `execute` tools:
-
 - **7 data types**: INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N)
 - **Joins**: INNER, LEFT, RIGHT, FULL OUTER, CROSS, NATURAL, self-joins, multi-table
 - **Subqueries**: scalar, IN/NOT IN, EXISTS/NOT EXISTS, ANY/SOME/ALL, correlated, derived tables
-- **CTEs**: WITH, WITH RECURSIVE, multiple CTEs, column aliases
-- **Window functions**: ROW_NUMBER, RANK, DENSE_RANK, NTILE, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTH_VALUE, PERCENT_RANK, CUME_DIST (plus all aggregates with OVER)
-- **GROUP BY extensions**: ROLLUP, CUBE, GROUPING SETS, GROUPING()
-- **Aggregates**: COUNT, SUM, AVG, MIN, MAX, MEDIAN, STRING_AGG, ARRAY_AGG, STDDEV, VARIANCE, and more
-- **100+ scalar functions**: string, math, date/time, JSON, hash, conditional, vector, type conversion
-- **Operators**: arithmetic, comparison, logical, bitwise, LIKE/ILIKE/GLOB/REGEXP, JSON (->/->>), vector (<=>), BETWEEN, IN, IS [NOT] DISTINCT FROM, INTERVAL
-- **Transactions**: BEGIN with isolation levels (READ COMMITTED, SNAPSHOT), COMMIT, ROLLBACK, SAVEPOINT
+- **CTEs**: WITH, WITH RECURSIVE, multiple CTEs, column aliases, WITH before INSERT/UPDATE/DELETE
+- **Window functions**: ROW_NUMBER, RANK, DENSE_RANK, NTILE, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTH_VALUE, PERCENT_RANK, CUME_DIST, every aggregate with OVER, named windows
+- **Aggregates**: 17 functions with DISTINCT and FILTER; GROUP BY ROLLUP, CUBE, GROUPING SETS; DISTINCT ON
+- **Scalar functions**: 98 functions across string, math, date/time, JSON, hash, conditional, type and vector categories
+- **Upsert**: ON CONFLICT DO UPDATE / DO NOTHING with EXCLUDED, ON DUPLICATE KEY UPDATE
+- **Bulk load**: COPY table FROM 'file.csv' WITH (FORMAT CSV, HEADER true)
+- **Transactions**: READ COMMITTED and SNAPSHOT isolation, savepoints
 - **Temporal queries**: AS OF TIMESTAMP, AS OF TRANSACTION
-- **Index types**: BTree, Hash, Bitmap, HNSW (vector), Unique, Composite
-- **Vector search**: k-NN with L2, cosine, inner product distances and HNSW indexing
-- **EXPLAIN / EXPLAIN ANALYZE** for query plan inspection
+- **Indexes**: BTree, Hash, Bitmap, HNSW (vector), unique, composite
+- **Vector search**: k-NN with L2, cosine and inner product distances, HNSW indexing
+- **EXPLAIN / EXPLAIN ANALYZE**
 
-## Options
+## Safety
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--path <path>` | `:memory:` | Database path. Use `:memory:` for in-memory or a file path for persistence. |
-| `--read-only` | `false` | Disable write operations. Read-only transactions (begin, query, commit) are still allowed for consistent reads. |
+- **Single statement per call**: the engine executes every statement of a multi-statement string but reports only the last one, so semicolon-separated batches are rejected.
+- **Tool routing**: `query` accepts only read statements, `execute` is blocked while a transaction is open, and transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT) are only reachable through the transaction tools, so the server always knows the connection's transaction state.
+- **Read-only mode** rejects every write, including COPY, DDL, SET, ANALYZE, VACUUM and PRAGMA actions.
+- **COPY ... FROM reads files on the host** with the server process's permissions, so an assistant can load any readable file into a table. Run with `--read-only` when that is not acceptable.
+- **DDL outside transactions**: only CREATE TABLE is rolled back reliably by the engine, so DDL, TRUNCATE and COPY are refused inside a transaction.
+- **EXPLAIN ANALYZE** is refused for write statements because it executes them.
+- **Injection guards**: table and view names are double-quoted, savepoint and pragma names must be bare identifiers, pragma values are validated per pragma.
+- The database is closed cleanly (open transaction rolled back, checkpoint on close) when the client disconnects or the process receives SIGINT/SIGTERM.
 
 ## Requirements
 
-- Node.js >= 18
-- The `@stoolap/node` package (installed automatically as a dependency)
+- Node.js >= 20
+- `@stoolap/node` (installed automatically) with prebuilt engine libraries for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64). A C compiler is needed for its small N-API addon. CI exercises Linux and macOS.
 
-The Stoolap native addon is bundled with `@stoolap/node` via prebuilt binaries for Linux (x64, arm64) and macOS (x64, arm64).
-
-## Building from Source
+## Development
 
 ```bash
 git clone https://github.com/stoolap/stoolap-mcp.git
 cd stoolap-mcp
 npm install
-npm run build
+npm test          # builds, then runs the end-to-end smoke tests against the built server
 node build/index.js --path ./mydata
 ```
+
+Releases are published to npm from the `v*` tag workflow using npm trusted publishing (OIDC); no token is needed.
 
 ## License
 
