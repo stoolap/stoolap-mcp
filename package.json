@@ -4,7 +4,7 @@
   "description": "MCP server for Stoolap embedded SQL database",
   "type": "module",
   "bin": {
-    "stoolap-mcp": "./build/index.js"
+    "stoolap-mcp": "build/index.js"
   },
   "files": [
     "build"
@@ -26,7 +26,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/stoolap/stoolap-mcp.git"
+    "url": "git+https://github.com/stoolap/stoolap-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
