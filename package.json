@@ -1,6 +1,7 @@
 {
   "name": "@stoolap/mcp",
   "version": "0.4.1",
+  "mcpName": "io.github.stoolap/mcp",
   "description": "MCP server for Stoolap embedded SQL database",
   "type": "module",
   "bin": {

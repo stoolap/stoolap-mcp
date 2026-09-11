@@ -6,6 +6,10 @@ Works with any MCP-compatible AI client: Claude Desktop, Claude Code, Cursor, Wi
 
 Version 0.4.x of this server targets the Stoolap 0.4.x engine (volume-based storage) through [`@stoolap/node`](https://github.com/stoolap/stoolap-node).
 
+## Registry
+
+The server is published to the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.stoolap/mcp`. `server.json` in this repository is the registry manifest; its `version` and the `mcpName` field in `package.json` are kept in step with the npm package.
+
 ## Quick Start
 
 ### Claude Desktop
