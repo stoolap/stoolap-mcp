@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.stoolap/mcp",
+  "description": "Query, manage and search a Stoolap embedded SQL database (Rust): SQL, transactions, vector search.",
+  "repository": {
+    "url": "https://github.com/stoolap/stoolap-mcp",
+    "source": "github"
+  },
+  "version": "0.4.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@stoolap/mcp",
+      "version": "0.4.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--path",
+          "description": "Database path. Omit for an in-memory database.",
+          "isRequired": false,
+          "format": "filepath",
+          "valueHint": "./mydata"
+        },
+        {
+          "type": "named",
+          "name": "--read-only",
+          "description": "Disable all write operations.",
+          "isRequired": false,
+          "format": "boolean"
+        }
+      ]
+    }
+  ]
+}
