@@ -422,7 +422,7 @@ async function buildSchemaText(): Promise<string> {
 const server = new McpServer(
   { name: "stoolap", version: PKG_VERSION },
   {
-    instructions: `Stoolap is an embedded SQL database (engine 0.4.x). Use the provided MCP tools to interact with it.
+    instructions: `Stoolap is an embedded SQL database (engine 0.4.2). Use the provided MCP tools to interact with it.
 
 Tool routing:
 - "query" for SELECT/SHOW/DESCRIBE/EXPLAIN/VALUES and WITH ... SELECT. "execute" for INSERT/UPDATE/DELETE/COPY, DDL, SET, ANALYZE, VACUUM. "execute_batch" for bulk inserts.
@@ -441,12 +441,13 @@ SQL essentials:
 - Set operations: UNION [ALL], INTERSECT [ALL], EXCEPT [ALL].
 - Operators: arithmetic, comparison, AND/OR/XOR/NOT, bitwise, ||, LIKE [ESCAPE]/ILIKE/GLOB/REGEXP, BETWEEN, IN, IS [NOT] DISTINCT FROM, JSON -> and ->>, vector <=>, INTERVAL arithmetic. Cast with CAST(x AS type); the :: syntax is not supported.
 - NULL = NULL yields NULL. Use IS NOT DISTINCT FROM for NULL-safe equality.
-- Indexes: BTREE (range/sort), HASH (equality), BITMAP (boolean), HNSW (vector k-NN). Auto-selected from the column type. DROP INDEX name ON table.
+- Indexes: BTREE (range/sort), HASH (equality), BITMAP (boolean), HNSW (vector k-NN). Auto-selected from the column type; one index per column. DROP INDEX name ON table.
 - Vectors: insert as '[0.1, 0.2, 0.3]'. k-NN: ORDER BY VEC_DISTANCE_L2|COSINE|IP(col, '[...]') LIMIT k. The HNSW index metric must match the distance function.
+- CREATE TABLE ... CLUSTER BY (cols) keeps sealed rows in key order for range scans on that prefix; ALTER TABLE t CLUSTER BY (cols) reclusters an existing table.
 - Transactions: READ COMMITTED (default) or SNAPSHOT isolation, SAVEPOINT / ROLLBACK TO SAVEPOINT. DDL, TRUNCATE and COPY cannot run inside a transaction.
 - Temporal: SELECT ... FROM t AS OF TIMESTAMP '...' | AS OF TRANSACTION n. VACUUM discards history.
 - Bulk load: COPY table [(cols)] FROM '/path/file.csv' WITH (FORMAT CSV, HEADER true) reads a file on the server host.
-- PRAGMA (via the "pragma" tool): checkpoint_interval, compact_threshold, target_volume_rows, keep_snapshots are read/write; sync_mode and wal_flush_trigger are read-only (set in the DSN); snapshot, checkpoint, restore, vacuum, volume_stats are actions.
+- PRAGMA (via the "pragma" tool): checkpoint_interval, compact_threshold, target_volume_rows, keep_snapshots, hot_max_rows, hot_max_bytes, group_cache_mb, index_cache_mb, index_build_mb are read/write; sync_mode and wal_flush_trigger are read-only (set in the DSN); volume_stats, memory_stats, group_cache_stats, index_stats, index_read_stats report; snapshot, checkpoint, restore, vacuum, index_backfill are actions.
 
 Limitations (do NOT attempt these):
 - No stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, LISTEN/NOTIFY.
@@ -965,7 +966,7 @@ server.registerTool(
   {
     title: "Create a table",
     description:
-      "Create a table. Column types: INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N). Constraints: PRIMARY KEY (column or table-level composite), NOT NULL, UNIQUE, DEFAULT, CHECK (column or table-level), AUTO_INCREMENT, REFERENCES / FOREIGN KEY (single column, ON DELETE/UPDATE CASCADE | SET NULL | RESTRICT | NO ACTION). Supports IF NOT EXISTS and CREATE TABLE AS SELECT.",
+      "Create a table. Column types: INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N). Constraints: PRIMARY KEY (column or table-level composite), NOT NULL, UNIQUE, DEFAULT, CHECK (column or table-level), AUTO_INCREMENT, REFERENCES / FOREIGN KEY (single column, ON DELETE/UPDATE CASCADE | SET NULL | RESTRICT | NO ACTION). Supports IF NOT EXISTS, CREATE TABLE AS SELECT and CLUSTER BY (cols) for key-ordered cold storage.",
     inputSchema: { sql: z.string().describe("Full CREATE TABLE statement") },
     annotations: ADDITIVE,
   },
@@ -977,7 +978,7 @@ server.registerTool(
   {
     title: "Create an index",
     description:
-      "Create an index: CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table(col, ...) [USING BTREE | HASH | BITMAP | HNSW] [WITH (...)]. Default type follows the column: BTREE for INTEGER/FLOAT/TIMESTAMP, HASH for TEXT/JSON, BITMAP for BOOLEAN. HNSW options: m, ef_construction, ef_search, metric ('l2', 'cosine', 'ip').",
+      "Create an index: CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table(col, ...) [USING BTREE | HASH | BITMAP | HNSW] [WITH (...)]. Default type follows the column: BTREE for INTEGER/FLOAT/TIMESTAMP, HASH for TEXT/JSON, BITMAP for BOOLEAN, HNSW for VECTOR. One index per column. HNSW options: m, ef_construction, ef_search, metric ('l2', 'cosine', 'ip').",
     inputSchema: { sql: z.string().describe("Full CREATE INDEX statement") },
     annotations: ADDITIVE,
   },
@@ -1001,7 +1002,7 @@ server.registerTool(
   {
     title: "Alter a table",
     description:
-      "Alter a table: ADD COLUMN, DROP COLUMN, RENAME COLUMN old TO new, MODIFY COLUMN col type [NOT NULL], RENAME TO new_name. MODIFY COLUMN does not validate existing rows.",
+      "Alter a table: ADD COLUMN, DROP COLUMN, RENAME COLUMN old TO new, MODIFY COLUMN col type [NOT NULL], RENAME TO new_name, CLUSTER BY (cols). MODIFY COLUMN does not validate existing rows.",
     inputSchema: { sql: z.string().describe("Full ALTER TABLE statement") },
     annotations: WRITE,
   },
@@ -1066,29 +1067,43 @@ server.registerTool(
   },
 );
 
-// PRAGMA surface of engine 0.4.x.
+// PRAGMA surface of engine 0.4.2.
 const PRAGMA_SETTINGS = new Set([
   "checkpoint_interval",
   "snapshot_interval", // legacy alias of checkpoint_interval
   "compact_threshold",
   "target_volume_rows",
   "keep_snapshots",
+  "hot_max_rows",
+  "hot_max_bytes",
+  "group_cache_mb",
+  "index_cache_mb",
+  "index_build_mb",
 ]);
-const PRAGMA_READONLY = new Set(["sync_mode", "wal_flush_trigger", "volume_stats"]);
-const PRAGMA_ACTIONS = new Set(["snapshot", "checkpoint", "restore", "vacuum"]);
+const PRAGMA_READONLY = new Set([
+  "sync_mode",
+  "wal_flush_trigger",
+  "volume_stats",
+  "memory_stats",
+  "group_cache_stats",
+  "index_stats",
+  "index_read_stats",
+]);
+// index_backfill takes an optional numeric limit.
+const PRAGMA_ACTIONS = new Set(["snapshot", "checkpoint", "restore", "vacuum", "index_backfill"]);
 
 server.registerTool(
   "pragma",
   {
     title: "Read or change engine settings",
     description:
-      "Read or set an engine setting, or run a maintenance action. Settings (read/write, numeric): checkpoint_interval (seconds between checkpoint cycles), compact_threshold (sub-target volumes before compaction), target_volume_rows (rows per cold volume, min 65536), keep_snapshots (backup snapshots retained). Read-only: sync_mode (0 none, 1 normal, 2 full), wal_flush_trigger, volume_stats (per-volume storage statistics). Actions: snapshot (write a backup snapshot), checkpoint (seal hot rows, truncate the WAL), vacuum (cleanup, returns counts), restore (replace ALL data with a backup snapshot; optional value = snapshot timestamp 'YYYYMMDD-HHMMSS.fff', latest when omitted).",
+      "Read or set an engine setting, or run a maintenance action. Settings (read/write, numeric): checkpoint_interval (seconds between checkpoint cycles), compact_threshold (sub-target volumes before compaction), target_volume_rows (rows per cold volume, min 65536), keep_snapshots (backup snapshots retained), hot_max_rows (committed hot rows per table that trigger an early seal, 0 = off), hot_max_bytes (hot bytes per table above which commits wait for a seal, 0 = off), group_cache_mb (decoded row group cache budget), index_cache_mb / index_build_mb (secondary index side file budgets). Read-only: sync_mode (0 none, 1 normal, 2 full), wal_flush_trigger, volume_stats, memory_stats (per-table hot/cold memory), group_cache_stats, index_stats, index_read_stats. Actions: snapshot (write a backup snapshot), checkpoint (seal hot rows, truncate the WAL), vacuum (cleanup, returns counts), index_backfill (build missing index side files; optional value = max volumes), restore (replace ALL data with a backup snapshot; optional value = snapshot timestamp 'YYYYMMDD-HHMMSS.fff', latest when omitted).",
     inputSchema: {
       name: z.string().describe("PRAGMA name"),
       value: z
         .union([z.string(), z.number()])
         .optional()
-        .describe("Value to set (omit to read). Numeric for settings, a snapshot timestamp for restore."),
+        .describe("Value to set (omit to read). Numeric for settings and index_backfill, a snapshot timestamp for restore."),
     },
     annotations: WRITE,
   },
@@ -1117,7 +1132,7 @@ server.registerTool(
             return err("restore value must be a snapshot timestamp like 20260315-120000.000");
           }
           sql += ` = '${ts}'`;
-        } else if (PRAGMA_SETTINGS.has(pragma)) {
+        } else if (PRAGMA_SETTINGS.has(pragma) || pragma === "index_backfill") {
           const n = Number(value);
           if (String(value).trim() === "" || !Number.isFinite(n)) {
             return err(`pragma ${pragma} value must be numeric`);
@@ -1285,7 +1300,7 @@ VECTOR(N) columns store N little-endian f32 values. Insert as the string literal
 k-NN (optimizer-detected): SELECT id, VEC_DISTANCE_COSINE(emb, '[...]') AS dist FROM t ORDER BY dist LIMIT 10
 HNSW index: CREATE INDEX idx ON t(emb) USING HNSW WITH (metric = 'cosine', m = 32, ef_construction = 200, ef_search = 128)
   metric: 'l2' (default), 'cosine', 'ip'. m 2-64, ef_construction 50-1000, ef_search 10-1000; defaults are chosen from the dimension count.
-  The index is used only when the query's distance function matches its metric; otherwise the scan is brute force. Several HNSW indexes with different metrics may exist on one column.
+  CREATE INDEX without USING on a VECTOR column also creates an HNSW index. A column holds one index: its metric decides which distance function it serves; a query with another distance function scans.
   With a WHERE clause the index fetches extra candidates and post-filters, falling back to brute force when too few remain.
 
 EMBED(text) (only in engine builds with the 'semantic' feature) returns a 384-dimension all-MiniLM-L6-v2 embedding computed locally. Compute it once in a CTE when it is reused: WITH q AS (SELECT EMBED('query') AS v) SELECT ... FROM docs, q ORDER BY VEC_DISTANCE_COSINE(emb, q.v) LIMIT 10`,
@@ -1362,12 +1377,13 @@ Not available: BLOB/BINARY, ARRAY, ENUM, DATE-only, INTERVAL as a column type (I
 - VALUES (1,'a'), (2,'b') AS v(id, name) as an inline table
 
 ### DDL
-- CREATE TABLE [IF NOT EXISTS] t (col type [constraints], ..., [PRIMARY KEY (a, b)], [CHECK (expr)], [FOREIGN KEY (col) REFERENCES parent(col) [ON DELETE action] [ON UPDATE action]])
+- CREATE TABLE [IF NOT EXISTS] t (col type [constraints], ..., [PRIMARY KEY (a, b)], [CHECK (expr)], [FOREIGN KEY (col) REFERENCES parent(col) [ON DELETE action] [ON UPDATE action]]) [CLUSTER BY (cols)]
+  - CLUSTER BY keeps sealed rows ordered by the key so prefix filters and ranges on it touch few row groups; JSON and VECTOR columns cannot be key columns
   - Column constraints: PRIMARY KEY, NOT NULL, UNIQUE, DEFAULT literal | NULL | CURRENT_TIMESTAMP | NOW(), CHECK (expr), AUTO_INCREMENT, REFERENCES parent(col)
   - Composite PRIMARY KEY and table-level CHECK are supported. Foreign keys are single-column only.
   - FK actions: CASCADE, SET NULL, RESTRICT, NO ACTION. Cascades recurse up to 16 levels; RESTRICT anywhere in the chain blocks the whole operation. An index is created automatically on FK columns. NULL FK values are never checked.
 - CREATE TABLE [IF NOT EXISTS] t AS SELECT ...
-- ALTER TABLE t ADD COLUMN col type | DROP COLUMN col | RENAME COLUMN old TO new | MODIFY COLUMN col type [NOT NULL] | RENAME TO new_name (MODIFY COLUMN does not validate existing rows)
+- ALTER TABLE t ADD COLUMN col type [DEFAULT expr] | DROP COLUMN col | RENAME COLUMN old TO new | MODIFY COLUMN col type [NOT NULL] | RENAME TO new_name | CLUSTER BY (cols) (ADD COLUMN fills existing rows with the DEFAULT or NULL; MODIFY COLUMN does not validate existing rows; a CLUSTER BY key column cannot be dropped)
 - DROP TABLE [IF EXISTS] t
 - CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON t(col1, col2) [USING BTREE | HASH | BITMAP | HNSW] [WITH (params)]
 - DROP INDEX [IF EXISTS] name ON t (the ON clause is required)
@@ -1415,13 +1431,13 @@ Casting only through CAST(expr AS type); the :: operator is not supported. Sorti
 | HASH | Equality, IN lists | TEXT, JSON | HASH |
 | BITMAP | Low-cardinality | BOOLEAN | BITMAP |
 | HNSW | Vector k-NN | - | HNSW |
-Multiple single-column indexes are intersected/unioned by the optimizer. SHOW INDEXES reports BTREE, HASH, BITMAP, HNSW, MULTICOLUMN or PRIMARYKEY.
-HNSW WITH (m, ef_construction, ef_search, metric): metric 'l2' (default) | 'cosine' | 'ip' must match the query's distance function.
+A column holds one index. Multiple single-column indexes are intersected/unioned by the optimizer. SHOW INDEXES reports BTREE, HASH, BITMAP, HNSW, MULTICOLUMN or PRIMARYKEY. On a file database, single-column BTREE indexes on INTEGER/TIMESTAMP columns also serve sealed volumes through side files.
+HNSW WITH (m, ef_construction, ef_search, metric): metric 'l2' (default) | 'cosine' | 'ip' must match the query's distance function. CREATE INDEX without USING on a VECTOR column is HNSW.
 
 ### Transactions
 - BEGIN [TRANSACTION] [ISOLATION LEVEL READ COMMITTED | SNAPSHOT | REPEATABLE READ | SERIALIZABLE]; COMMIT; ROLLBACK (START TRANSACTION and END are not recognised)
 - READ COMMITTED (default): each statement sees the latest commits. SNAPSHOT: the whole transaction sees the state at BEGIN. REPEATABLE READ and SERIALIZABLE map to SNAPSHOT.
-- SAVEPOINT name; ROLLBACK TO SAVEPOINT name; RELEASE SAVEPOINT name
+- SAVEPOINT name; ROLLBACK TO SAVEPOINT name (keeps the savepoint, drops later ones); RELEASE SAVEPOINT name (drops it and every later one)
 - SET isolation_level = 'SNAPSHOT' changes the default for later transactions
 - MVCC: readers never block writers; write conflicts surface at commit (or immediately for rows already sealed into cold volumes). A failed statement does not abort the transaction.
 - DDL, TRUNCATE and COPY belong outside transactions: only CREATE TABLE is rolled back reliably; ALTER TABLE, CREATE INDEX and CREATE VIEW persist, DROP TABLE loses its rows, COPY is rejected.
@@ -1435,9 +1451,10 @@ SHOW TABLES | SHOW VIEWS | SHOW INDEXES FROM t | SHOW CREATE TABLE t | SHOW CREA
 EXPLAIN stmt | EXPLAIN ANALYZE stmt (executes the statement) | ANALYZE t (optimizer statistics) | VACUUM [t]
 
 ### PRAGMA
-Read/write: checkpoint_interval (s, default 60), compact_threshold (default 4), target_volume_rows (default 1048576, min 65536), keep_snapshots (default 3)
+Read/write: checkpoint_interval (s, default 60), compact_threshold (default 4), target_volume_rows (default 1048576, min 65536), keep_snapshots (default 3), hot_max_rows (default 262144, 0 = off), hot_max_bytes (default 0 = off), group_cache_mb (default 64, 0 = bypass), index_cache_mb (default 16), index_build_mb (default 64)
 Read-only: sync_mode (0 none, 1 normal, 2 full), wal_flush_trigger; set them in the DSN, e.g. file:///data/db?sync_mode=full
-Actions: PRAGMA snapshot (backup), PRAGMA checkpoint (seal + compact + WAL truncate), PRAGMA restore [= 'YYYYMMDD-HHMMSS.fff'] (replaces all data, persistent databases only), PRAGMA vacuum, PRAGMA volume_stats
+Reports: PRAGMA volume_stats, memory_stats (per-table hot/cold memory, '*' totals row), group_cache_stats, index_stats, index_read_stats
+Actions: PRAGMA snapshot (backup), PRAGMA checkpoint (seal + compact + WAL truncate), PRAGMA restore [= 'YYYYMMDD-HHMMSS.fff'] (replaces all data, persistent databases only), PRAGMA vacuum, PRAGMA index_backfill [= n] (build missing index side files)
 DSN-only options: wal_buffer_size, wal_max_size, wal_compression, volume_compression, compression, compression_threshold, checkpoint_on_close, commit_batch_size, sync_interval_ms, cleanup, cleanup_interval, deleted_row_retention, transaction_retention
 
 ### Known Limitations (do NOT attempt these)

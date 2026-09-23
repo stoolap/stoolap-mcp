@@ -59,10 +59,10 @@ test("exposes 30 tools with annotations, 2 resources and 1 prompt", async () => 
   assert.deepEqual(prompts.map((p) => p.name), ["sql-assistant"]);
 });
 
-test("version tool reports engine 0.4.x", async () => {
+test("version tool reports engine 0.4.2", async () => {
   const r = await call(client, "version");
   assert.ok(r.ok, r.text);
-  assert.match(r.text, /stoolap 0\.4\./);
+  assert.match(r.text, /stoolap 0\.4\.2/);
 });
 
 test("create_table, execute with params, RETURNING, query", async () => {
@@ -213,8 +213,8 @@ test("transactions: rollback discards, commit keeps, savepoints work", async () 
   assert.ok(r.ok, r.text);
   r = await call(client, "rollback_to_savepoint", { name: "sp1" });
   assert.ok(r.ok, r.text);
-  // TODO: assert release_savepoint succeeds once an engine with the
-  // RELEASE SAVEPOINT parser fix ships in @stoolap/node.
+  r = await call(client, "release_savepoint", { name: "sp1" });
+  assert.ok(r.ok, r.text);
   r = await call(client, "savepoint", { name: "bad name" });
   assert.ok(!r.ok);
   r = await call(client, "commit_transaction");
@@ -298,6 +298,17 @@ test("pragma: read, set, action, validation", async () => {
   r = await call(client, "pragma", { name: "keep_snapshots", value: 5 });
   assert.deepEqual(JSON.parse(r.text), [{ keep_snapshots: 5 }]);
 
+  r = await call(client, "pragma", { name: "hot_max_rows", value: 1000 });
+  assert.deepEqual(JSON.parse(r.text), [{ hot_max_rows: 1000 }]);
+
+  r = await call(client, "pragma", { name: "memory_stats" });
+  assert.ok(r.ok, r.text);
+  assert.ok(JSON.parse(r.text).some((row) => row.table_name === "*"));
+
+  r = await call(client, "pragma", { name: "index_backfill", value: 2 });
+  assert.ok(r.ok, r.text);
+  assert.match(r.text, /examined/);
+
   r = await call(client, "pragma", { name: "vacuum" });
   assert.ok(r.ok, r.text);
   assert.match(r.text, /deleted_rows_cleaned/);
@@ -321,6 +332,16 @@ test("pragma: read, set, action, validation", async () => {
   assert.ok(r.ok, r.text);
   r = await call(client, "vacuum", { table: "users" });
   assert.ok(r.ok, r.text);
+});
+
+test("STDDEV and VARIANCE are sample statistics", async () => {
+  const r = await call(client, "query", {
+    sql: "SELECT STDDEV(v) AS s, VARIANCE(v) AS va FROM (VALUES (1.0), (2.0), (3.0), (4.0)) AS x(v)",
+  });
+  assert.ok(r.ok, r.text);
+  const [row] = JSON.parse(r.text);
+  assert.ok(Math.abs(row.s - 1.2909944) < 1e-6);
+  assert.ok(Math.abs(row.va - 1.6666667) < 1e-6);
 });
 
 test("list_functions", async () => {

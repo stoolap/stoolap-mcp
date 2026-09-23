@@ -121,10 +121,10 @@ Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so clien
 
 | Tool | Description |
 |------|-------------|
-| `create_table` | INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N) columns; PRIMARY KEY (including composite), NOT NULL, UNIQUE, DEFAULT, CHECK, AUTO_INCREMENT, single-column foreign keys; IF NOT EXISTS; CREATE TABLE AS SELECT |
+| `create_table` | INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N) columns; PRIMARY KEY (including composite), NOT NULL, UNIQUE, DEFAULT, CHECK, AUTO_INCREMENT, single-column foreign keys; IF NOT EXISTS; CREATE TABLE AS SELECT; CLUSTER BY |
 | `create_index` | BTREE, HASH, BITMAP or HNSW indexes, UNIQUE and composite. HNSW options: m, ef_construction, ef_search, metric |
 | `create_view` | Read-only view that persists across restarts |
-| `alter_table` | ADD COLUMN, DROP COLUMN, RENAME COLUMN, MODIFY COLUMN, RENAME TO |
+| `alter_table` | ADD COLUMN, DROP COLUMN, RENAME COLUMN, MODIFY COLUMN, RENAME TO, CLUSTER BY |
 | `drop` | DROP TABLE / VIEW / INDEX ... ON table (supports IF EXISTS) |
 
 ### Database Administration
@@ -133,7 +133,7 @@ Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so clien
 |------|-------------|
 | `analyze_table` | Collect optimizer statistics for a table |
 | `vacuum` | Remove deleted rows and old MVCC versions, compact indexes (discards time-travel history) |
-| `pragma` | Read or set `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`; read `sync_mode`, `wal_flush_trigger`, `volume_stats`; run `snapshot`, `checkpoint`, `vacuum`, `restore` |
+| `pragma` | Read or set `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`, `hot_max_rows`, `hot_max_bytes`, `group_cache_mb`, `index_cache_mb`, `index_build_mb`; read `sync_mode`, `wal_flush_trigger`, `volume_stats`, `memory_stats`, `group_cache_stats`, `index_stats`, `index_read_stats`; run `snapshot`, `checkpoint`, `vacuum`, `index_backfill`, `restore` |
 | `version` | Engine and server version |
 | `list_functions` | All built-in SQL functions with signatures, grouped by category |
 
