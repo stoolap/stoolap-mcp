@@ -16,14 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { FUNCTION_SECTIONS, INSTRUCTIONS, SQL_REFERENCE } from "./reference.js";
 import type { Params, Session } from "./session.js";
-import {
-  classify,
-  hasReturning,
-  isBareId,
-  quoteId,
-  singleStatementError,
-  stripExplain,
-} from "./sql.js";
+import { hasReturning, isBareId, isPlainCreateTable, parse, quoteId, type Statement } from "./sql.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -47,29 +40,44 @@ function failure(e: unknown): ToolResult {
 }
 
 const READ_ONLY_ERR = "the server is in read-only mode";
+const TX_ERR = "transaction control runs only through begin_transaction, commit_transaction, rollback_transaction and savepoint.";
+
+function statement(sql: string): Statement | ToolResult {
+  const st = parse(sql);
+  return "error" in st ? err(st.error) : st;
+}
+
+function isResult(x: Statement | ToolResult): x is ToolResult {
+  return "content" in x;
+}
+
+// JSON numbers past 2^53 have already lost digits when they arrive.
+function unsafeParam(p: unknown): string | null {
+  const values = Array.isArray(p) ? p : p && typeof p === "object" ? Object.values(p) : [];
+  const bad = values.find((v) => typeof v === "number" && Number.isInteger(v) && !Number.isSafeInteger(v));
+  return bad === undefined
+    ? null
+    : `parameter ${String(bad)} is beyond the exact integer range of JSON numbers; pass it as a string, e.g. "9007199254740993".`;
+}
 
 const paramValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 const params = z
   .union([z.array(paramValue), z.record(z.string(), paramValue)])
   .optional()
-  .describe("Bind parameters: an array for $1, $2 or ?, an object for :name");
+  .describe("Bind parameters: an array for $1, $2 or ?, an object for :name. JSON and VECTOR values go as text, integers past 2^53 as strings.");
 const maxRows = z
   .number()
   .int()
   .min(1)
   .optional()
-  .describe("Row limit for this call (default: the server's --max-rows)");
+  .describe("Return at most this many rows (the server's --max-rows still caps it)");
 
 const READ = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: true, openWorldHint: false } as const;
 const ADDITIVE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 
-// DDL that the engine does not undo with the transaction.
-function ddlInTxError(sql: string): string | null {
-  const w = sql.trim().split(/\s+/, 3).map((s) => s.toUpperCase());
-  if (w[0] === "CREATE" && w[1] === "TABLE") return null;
-  return "this statement is not undone by ROLLBACK (ALTER, CREATE INDEX and CREATE VIEW persist; DROP TABLE and TRUNCATE lose rows). Commit or roll back first, then run it outside the transaction.";
-}
+const DDL_IN_TX_ERR =
+  "only a plain CREATE TABLE is undone by ROLLBACK (CREATE TABLE ... AS SELECT, ALTER, CREATE INDEX and CREATE VIEW persist; DROP TABLE and TRUNCATE lose rows). Commit or roll back first, then run it outside the transaction.";
 
 const PRAGMA_SETTINGS = new Set([
   "checkpoint_interval",
@@ -92,16 +100,21 @@ const PRAGMA_REPORTS = new Set([
   "group_cache_stats",
   "index_stats",
   "index_read_stats",
-  "verify",
 ]);
 const PRAGMA_ACTIONS = new Set(["checkpoint", "snapshot", "restore", "vacuum", "index_backfill"]);
-// Session-only settings that change no data: allowed in read-only mode.
-const PRAGMA_SESSION = new Set(["query_timeout"]);
 
-async function schemaText(s: Session, table?: string): Promise<string> {
-  const tables = table
-    ? [table]
-    : (await s.objects("SHOW TABLES")).map((r) => String(Object.values(r)[0]));
+// Tables the engine keeps for ANALYZE statistics.
+const isSystemTable = (name: string) => name.toLowerCase().startsWith("_sys_");
+
+async function names(s: Session, sql: string): Promise<string[]> {
+  return (await s.objects(sql)).map((r) => String(Object.values(r)[0]));
+}
+
+async function schemaText(s: Session, only?: string): Promise<string> {
+  const allViews = await names(s, "SHOW VIEWS");
+  const view = only ? allViews.find((v) => v.toLowerCase() === only.toLowerCase()) : undefined;
+  const tables = only ? (view ? [] : [only]) : (await names(s, "SHOW TABLES")).filter((t) => !isSystemTable(t));
+  const views = only ? (view ? [view] : []) : allViews;
   let out = "";
   for (const t of tables) {
     const ddl = await s.objects(`SHOW CREATE TABLE ${quoteId(t)}`);
@@ -115,9 +128,8 @@ async function schemaText(s: Session, table?: string): Promise<string> {
     }
     out += "\n";
   }
-  if (!table) {
-    for (const r of await s.objects("SHOW VIEWS")) {
-      const v = String(Object.values(r)[0]);
+  {
+    for (const v of views) {
       const ddl = await s.objects(`SHOW CREATE VIEW ${quoteId(v)}`);
       out += `${String(Object.values(ddl[0] ?? {})[1] ?? `-- ${v}`)};\n\n`;
     }
@@ -150,11 +162,12 @@ export function createServer(s: Session, version: string): McpServer {
       annotations: READ,
     },
     tool(async ({ sql, params: p, max_rows }: { sql: string; params?: Params; max_rows?: number }) => {
-      const bad = singleStatementError(sql);
+      const st = statement(sql);
+      if (isResult(st)) return st;
+      if (st.kind === "tx") return err(TX_ERR);
+      if (st.kind !== "read") return err("query runs read-only statements only. Use execute for writes.");
+      const bad = unsafeParam(p);
       if (bad) return err(bad);
-      const kind = classify(sql);
-      if (kind === "tx") return err("use begin_transaction, commit_transaction, rollback_transaction or savepoint.");
-      if (kind !== "read") return err("query runs read-only statements only. Use execute for writes.");
       return json(await s.rows(sql, p, max_rows));
     }),
   );
@@ -169,18 +182,17 @@ export function createServer(s: Session, version: string): McpServer {
       annotations: WRITE,
     },
     tool(async ({ sql, params: p, max_rows }: { sql: string; params?: Params; max_rows?: number }) => {
-      const bad = singleStatementError(sql);
-      if (bad) return err(bad);
-      const kind = classify(sql);
-      if (kind === "tx") return err("use begin_transaction, commit_transaction, rollback_transaction or savepoint.");
-      if (kind === "read") return err("execute does not run read-only statements. Use query.");
-      if (/^\s*PRAGMA\b/i.test(sql)) return err("use the pragma tool.");
+      const st = statement(sql);
+      if (isResult(st)) return st;
+      if (st.kind === "tx") return err(TX_ERR);
+      if (st.kind === "read") return err("execute does not run read-only statements. Use query.");
+      if (st.kind === "pragma") return err("use the pragma tool.");
+      if (st.kind === "other") return err("execute runs INSERT, UPDATE, DELETE, COPY, CREATE, ALTER, DROP, TRUNCATE, ANALYZE, VACUUM or SET.");
       if (s.readOnly) return err(READ_ONLY_ERR);
-      if (kind === "ddl" && s.txActive) {
-        const e = ddlInTxError(sql);
-        if (e) return err(e);
-      }
-      if (hasReturning(sql)) return json(await s.rows(sql, p, max_rows));
+      if (st.kind === "ddl" && s.txActive && !isPlainCreateTable(st)) return err(DDL_IN_TX_ERR);
+      const bad = unsafeParam(p);
+      if (bad) return err(bad);
+      if (st.analyzed || hasReturning(st)) return json(await s.rows(sql, p, max_rows));
       const changes = await s.execute(sql, p);
       return json({ affected_rows: changes });
     }),
@@ -191,7 +203,7 @@ export function createServer(s: Session, version: string): McpServer {
     {
       title: "Run one statement for many parameter sets",
       description:
-        "Run one INSERT, UPDATE or DELETE once per parameter set. Outside a transaction all sets apply atomically: either every one succeeds or none does. Inside a transaction the rows join it. Returns the total affected row count.",
+        "Run one INSERT, UPDATE or DELETE once per parameter set, all or nothing: when one set fails, none of them stays applied. Inside an open transaction the rows join it. Returns the total affected row count.",
       inputSchema: {
         sql: z.string().describe("One statement with $1, $2 or ? placeholders"),
         params_array: z.array(z.array(paramValue)).min(1).describe("One positional parameter array per execution"),
@@ -199,12 +211,16 @@ export function createServer(s: Session, version: string): McpServer {
       annotations: WRITE,
     },
     tool(async ({ sql, params_array }: { sql: string; params_array: unknown[][] }) => {
-      const bad = singleStatementError(sql);
-      if (bad) return err(bad);
-      if (classify(sql) !== "write" || hasReturning(sql)) {
+      const st = statement(sql);
+      if (isResult(st)) return st;
+      if (st.kind !== "write" || st.analyzed || st.words[0].text === "COPY" || hasReturning(st)) {
         return err("execute_batch runs INSERT, UPDATE or DELETE without RETURNING.");
       }
       if (s.readOnly) return err(READ_ONLY_ERR);
+      for (const set of params_array) {
+        const bad = unsafeParam(set);
+        if (bad) return err(bad);
+      }
       return json({ affected_rows: s.batch(sql, params_array) });
     }),
   );
@@ -216,22 +232,27 @@ export function createServer(s: Session, version: string): McpServer {
       description:
         "Show the plan of one statement, one step per line. A line starting with 'else' is the fallback used when the step above cannot run. With analyze=true the statement runs and the plan shows actual time and rows plus a final 'Paths:' line naming the paths taken; analyze is refused for statements that write.",
       inputSchema: {
-        sql: z.string().describe("The statement, with or without EXPLAIN"),
+        sql: z.string().describe("The statement, without EXPLAIN"),
         analyze: z.boolean().optional().describe("Run it and report actual time and rows"),
         params,
       },
       annotations: READ,
     },
     tool(async ({ sql, analyze, params: p }: { sql: string; analyze?: boolean; params?: Params }) => {
-      const bad = singleStatementError(sql);
-      if (bad) return err(bad);
-      const body = stripExplain(sql);
-      const kind = classify(body);
-      if (kind === "tx") return err("transaction control statements have no plan.");
-      if (analyze && kind !== "read") {
-        return err("EXPLAIN ANALYZE runs the statement, so it is refused for writes. Use analyze=false.");
+      const body = statement(sql);
+      if (isResult(body)) return body;
+      if (body.explain) return err("pass the statement without EXPLAIN; set analyze to run it.");
+      // Judge the text that is sent: a body starting with ANALYZE turns plain EXPLAIN into EXPLAIN ANALYZE.
+      const full = `${analyze ? "EXPLAIN ANALYZE" : "EXPLAIN"} ${sql}`;
+      const st = statement(full);
+      if (isResult(st)) return st;
+      if (st.kind === "tx") return err(TX_ERR);
+      if (st.kind !== "read") {
+        return err("EXPLAIN ANALYZE runs the statement, so it is refused for anything but reads. Use analyze=false.");
       }
-      const r = await s.rows(`${analyze ? "EXPLAIN ANALYZE" : "EXPLAIN"} ${body}`, p, 0);
+      const bad = unsafeParam(p);
+      if (bad) return err(bad);
+      const r = await s.rows(full, p, Infinity);
       return ok(r.rows.map((row) => String(row[0])).join("\n"));
     }),
   );
@@ -323,10 +344,9 @@ export function createServer(s: Session, version: string): McpServer {
       annotations: READ,
     },
     tool(async () => {
-      const first = (r: Record<string, unknown>) => String(Object.values(r)[0]);
       return json({
-        tables: (await s.objects("SHOW TABLES")).map(first),
-        views: (await s.objects("SHOW VIEWS")).map(first),
+        tables: (await names(s, "SHOW TABLES")).filter((t) => !isSystemTable(t)),
+        views: await names(s, "SHOW VIEWS"),
       });
     }),
   );
@@ -336,8 +356,8 @@ export function createServer(s: Session, version: string): McpServer {
     {
       title: "Get the schema",
       description:
-        "The schema: CREATE TABLE with constraints and foreign keys, a comment line per secondary index (including UNIQUE constraints and the indexes made for foreign keys), and CREATE VIEW. Pass a table name for one table. Call this before writing queries.",
-      inputSchema: { table: z.string().optional().describe("One table (default: everything)") },
+        "The schema: CREATE TABLE with constraints and foreign keys, a comment line per secondary index (including UNIQUE constraints and the indexes made for foreign keys), and CREATE VIEW. Pass a name for one table or view. Call this before writing queries.",
+      inputSchema: { table: z.string().optional().describe("One table or view (default: everything)") },
       annotations: READ,
     },
     tool(async ({ table }: { table?: string }) => ok(await schemaText(s, table))),
@@ -350,7 +370,7 @@ export function createServer(s: Session, version: string): McpServer {
     {
       title: "Engine settings, reports and maintenance",
       description:
-        "Read or change an engine setting, read a report, or run a maintenance action. Settings (numeric): checkpoint_interval, compact_threshold, target_volume_rows, keep_snapshots, hot_max_rows, hot_max_bytes, group_cache_mb, index_cache_mb, index_build_mb, query_timeout (ms, this session). Reports: sync_mode, wal_flush_trigger, volume_stats, memory_stats, group_cache_stats, index_stats, index_read_stats, verify. Actions: checkpoint, snapshot, vacuum, index_backfill (value = max volumes), restore (value = snapshot timestamp 'YYYYMMDD-HHMMSS.fff', latest when omitted; replaces ALL data).",
+        "Read or change an engine setting, read a report, or run a maintenance action. Settings (numeric): checkpoint_interval, compact_threshold, target_volume_rows, keep_snapshots, hot_max_rows, hot_max_bytes, group_cache_mb, index_cache_mb, index_build_mb, query_timeout (ms, this session). Reports: sync_mode, wal_flush_trigger, volume_stats, memory_stats, group_cache_stats, index_stats, index_read_stats (for PRAGMA VERIFY use the verify tool). Actions: checkpoint, snapshot, vacuum, index_backfill (value = max volumes), restore (value = snapshot timestamp 'YYYYMMDD-HHMMSS.fff', latest when omitted; replaces ALL data).",
       inputSchema: {
         name: z.string().describe("PRAGMA name"),
         value: z.union([z.string(), z.number()]).optional().describe("Value to set; omit to read"),
@@ -364,7 +384,7 @@ export function createServer(s: Session, version: string): McpServer {
         return err(`unknown pragma '${name}'. Known: ${[...PRAGMA_SETTINGS, ...PRAGMA_REPORTS, ...PRAGMA_ACTIONS].join(", ")}`);
       }
       const writes = value !== undefined || PRAGMA_ACTIONS.has(pragma);
-      if (writes && s.readOnly && !PRAGMA_SESSION.has(pragma)) return err(READ_ONLY_ERR);
+      if (writes && s.readOnly) return err(READ_ONLY_ERR);
       let sql = `PRAGMA ${pragma}`;
       if (value !== undefined) {
         if (pragma === "restore") {
@@ -379,7 +399,7 @@ export function createServer(s: Session, version: string): McpServer {
           return err(`pragma ${pragma} takes no value`);
         }
       }
-      return json(await s.rows(sql, undefined, 0));
+      return json(await s.rows(sql, undefined, Infinity));
     }),
   );
 
@@ -392,7 +412,7 @@ export function createServer(s: Session, version: string): McpServer {
       inputSchema: {},
       annotations: READ,
     },
-    tool(async () => json(await s.rows("PRAGMA verify", undefined, 0))),
+    tool(async () => json(await s.rows("PRAGMA verify", undefined, Infinity))),
   );
 
   const categories = ["all", ...Object.keys(FUNCTION_SECTIONS)] as [string, ...string[]];
@@ -413,7 +433,7 @@ export function createServer(s: Session, version: string): McpServer {
     "version",
     {
       title: "Versions",
-      description: "The engine version and build, and this server's version and limits.",
+      description: "The engine version and build, this server's version and limits, and whether a transaction is open.",
       inputSchema: {},
       annotations: { ...READ, idempotentHint: true },
     },
@@ -426,6 +446,7 @@ export function createServer(s: Session, version: string): McpServer {
         read_only: s.readOnly,
         max_rows: s.maxRows,
         query_timeout_ms: timeout?.query_timeout,
+        transaction: s.txIsolation,
       });
     }),
   );

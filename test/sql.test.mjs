@@ -1,34 +1,52 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classify, singleStatementError, stripExplain } from "../build/sql.js";
+import { isPlainCreateTable, parse } from "../build/sql.js";
 import { parseArgs } from "../build/cli.js";
 
-test("classify routes statements by their effect", () => {
+const kind = (sql) => {
+  const st = parse(sql);
+  return "error" in st ? `error: ${st.error}` : st.kind;
+};
+
+test("statements are classified by their effect", () => {
   const cases = {
     "SELECT 1": "read",
     "  ( (SELECT 1) )": "read",
     "with c as (select 1) select * from c": "read",
     "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c": "write",
     "WITH c AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT * FROM c)": "write",
+    "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r": "read",
     "SHOW TABLES": "read",
     "DESCRIBE t": "read",
     "EXPLAIN SELECT 1": "read",
     "EXPLAIN DELETE FROM t": "read",
     "EXPLAIN ANALYZE DELETE FROM t": "write",
     "EXPLAIN ANALYZE SELECT 1": "read",
+    "EXPLAIN ANALYZE ANALYZE t": "admin",
+    "EXPLAIN ANALYZE PRAGMA checkpoint": "pragma",
+    "EXPLAIN COMMIT": "tx",
     "INSERT INTO t VALUES (1)": "write",
     "COPY t FROM '/tmp/x.csv'": "write",
     "CREATE TABLE t (id INTEGER)": "ddl",
     "TRUNCATE TABLE t": "ddl",
-    "PRAGMA checkpoint": "admin",
+    "PRAGMA checkpoint": "pragma",
+    "/**/PRAGMA checkpoint": "pragma",
     "SET isolation_level = 'SNAPSHOT'": "admin",
     "BEGIN": "tx",
-    "EXPLAIN COMMIT": "tx",
     "VALUES (1)": "other",
     "/* x */ -- y\nSELECT 1": "read",
     "# comment\nDELETE FROM t": "write",
   };
-  for (const [sql, kind] of Object.entries(cases)) assert.equal(classify(sql), kind, sql);
+  for (const [sql, k] of Object.entries(cases)) assert.equal(kind(sql), k, sql);
+});
+
+test("Unicode whitespace separates words, as in the engine lexer", () => {
+  assert.equal(kind("WITH c AS (SELECT 1)\u0085INSERT INTO t SELECT * FROM c"), "write");
+  assert.equal(kind("EXPLAIN ANALYZE\u0085DELETE FROM t"), "write");
+  assert.equal(kind("\u0085COMMIT"), "tx");
+  assert.equal(kind(" BEGIN"), "tx");
+  assert.equal(kind("SELECT 1"), "read");
+  assert.match(kind("﻿SELECT 1"), /byte order mark/);
 });
 
 test("a second statement is found past literals, identifiers and comments", () => {
@@ -41,9 +59,9 @@ test("a second statement is found past literals, identifiers and comments", () =
     "SELECT 1 -- ; DROP TABLE t",
     "SELECT 1 # ; DROP TABLE t",
     "SELECT 1 /* ; */",
-    "SELECT 1;  ",
+    "SELECT 1;  -- trailing",
   ];
-  for (const sql of single) assert.equal(singleStatementError(sql), null, sql);
+  for (const sql of single) assert.equal(kind(sql), "read", sql);
 
   const multi = [
     "SELECT 1; SELECT 2",
@@ -51,17 +69,21 @@ test("a second statement is found past literals, identifiers and comments", () =
     // The engine reads # as a line comment, so the quote below opens no literal.
     "SELECT 1 # '\n; DROP TABLE t; --'",
     "SELECT 1 /* a */ ; DELETE FROM t",
+    "SELECT 1;\u0085COMMIT",
   ];
-  for (const sql of multi) assert.match(singleStatementError(sql) ?? "", /multiple SQL statements/, sql);
+  for (const sql of multi) assert.match(kind(sql), /multiple SQL statements/, sql);
 
-  assert.match(singleStatementError("  ;  ") ?? "", /empty/);
-  assert.match(singleStatementError("SELECT 1\0; DROP TABLE t") ?? "", /NUL/);
+  assert.match(kind("  ;  "), /empty/);
+  assert.match(kind("SELECT 1\0; DROP TABLE t"), /NUL/);
 });
 
-test("stripExplain accepts both forms", () => {
-  assert.equal(stripExplain("EXPLAIN ANALYZE SELECT 1"), "SELECT 1");
-  assert.equal(stripExplain("explain select 1"), "select 1");
-  assert.equal(stripExplain("SELECT 1"), "SELECT 1");
+test("CREATE TABLE AS SELECT is not a plain CREATE TABLE", () => {
+  const plain = (sql) => isPlainCreateTable(parse(sql));
+  assert.equal(plain("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER CHECK (v > 0))"), true);
+  assert.equal(plain("/* x */ create table t (id INTEGER PRIMARY KEY)"), true);
+  assert.equal(plain("CREATE TABLE t AS SELECT 1 AS a"), false);
+  assert.equal(plain("CREATE TABLE t AS (SELECT 1 AS a)"), false);
+  assert.equal(plain("CREATE INDEX i ON t(a)"), false);
 });
 
 test("parseArgs", () => {

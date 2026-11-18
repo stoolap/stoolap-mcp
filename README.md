@@ -48,7 +48,7 @@ The server talks over stdio, so the container must run with `-i`.
 |------|---------|-------------|
 | `--path <path>` | `:memory:` | Database path or DSN. Engine options go in the query string, e.g. `./mydata?sync_mode=full&checkpoint_interval=30`. |
 | `--read-only` | off | Refuse every statement that writes data, schema or engine settings. Reads and read-only transactions still work. |
-| `--max-rows <n>` | `1000` | The most rows one call returns. Longer results come back cut, with `truncated: true`. `0` removes the limit. A call can ask for a lower or higher limit with `max_rows`. |
+| `--max-rows <n>` | `1000` | The most rows one call returns. Longer results come back cut, with `truncated: true`. A call can ask for fewer with `max_rows`, never for more. `0` removes the limit. |
 | `--query-timeout <ms>` | `30000` | Stop any statement that runs longer, with the error `query cancelled`. `0` turns it off. Without the flag, a `query_timeout` in the DSN is used instead of the default. |
 | `--version` | | Print the server version and exit. |
 
@@ -62,8 +62,8 @@ Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so a cli
 |------|--------------|
 | `query` | Runs one read-only statement: SELECT, WITH ... SELECT, SHOW, DESCRIBE, EXPLAIN. |
 | `execute` | Runs one statement that writes: INSERT, UPDATE, DELETE, COPY, CREATE, ALTER, DROP, TRUNCATE, ANALYZE, VACUUM, SET. Returns `{"affected_rows": n}`, or rows when the statement has RETURNING. |
-| `execute_batch` | Runs one INSERT, UPDATE or DELETE once per parameter set. Outside a transaction the whole batch applies atomically. |
-| `explain` | Prints the plan of a statement, one step per line. With `analyze: true` it runs the statement and shows actual time, rows and the paths taken; this is refused for writes. |
+| `execute_batch` | Runs one INSERT, UPDATE or DELETE once per parameter set, all or nothing: when one set fails, none of them stays applied, inside a transaction too. |
+| `explain` | Prints the plan of a statement (given without EXPLAIN), one step per line. With `analyze: true` it runs the statement and shows actual time, rows and the paths taken; this is refused for anything but reads. |
 
 `query` and RETURNING return rows in one shape:
 
@@ -71,9 +71,14 @@ Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so a cli
 {"columns": ["id", "name"], "rows": [[1, "alice"], [2, "bob"]], "row_count": 2, "truncated": false}
 ```
 
-Columns keep their order and duplicate names (`SELECT a.id, b.id`), and an empty result still lists its columns. TIMESTAMP values are ISO 8601 strings, VECTOR values are arrays of numbers, and the FLOAT values NaN, Infinity and -Infinity are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, because JSON has no way to write them.
+Columns keep their order and duplicate names (`SELECT a.id, b.id`), and an empty result still lists its columns. VECTOR values are arrays of numbers, and the FLOAT values NaN, Infinity and -Infinity are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, because JSON has no way to write them.
 
-Parameters are an array for `$1, $2` or `?` placeholders, or an object for `:name` placeholders.
+Parameters are an array for `$1, $2` or `?` placeholders, or an object for `:name` placeholders. JSON and VECTOR values are passed as text.
+
+Two limits come from the Node.js driver, and the instructions tell the assistant about both:
+
+- INTEGER values travel as JavaScript numbers, which are exact only up to 2^53. A larger parameter is refused with a hint to pass it as a string, which the engine converts exactly; read large values with `CAST(x AS TEXT)`.
+- TIMESTAMP values come back as ISO 8601 strings to the millisecond. `CAST(ts AS TEXT)` gives all nine digits.
 
 ### Transactions
 
@@ -91,7 +96,9 @@ While a transaction is open, `query`, `execute` and `execute_batch` run inside i
 | Tool | What it does |
 |------|--------------|
 | `list_tables` | The names of all tables and views. |
-| `get_schema` | CREATE TABLE for every table (or the one named) with constraints and foreign keys, a line per secondary index, and CREATE VIEW for every view. |
+| `get_schema` | CREATE TABLE for every table (or the one table or view named) with constraints and foreign keys, a line per secondary index, and CREATE VIEW for every view. |
+
+Both leave out the `_sys_table_stats` and `_sys_column_stats` tables in which ANALYZE keeps optimizer statistics.
 
 ### Engine
 
@@ -100,12 +107,12 @@ While a transaction is open, `query`, `execute` and `execute_batch` run inside i
 | `pragma` | Reads or changes an engine setting, reads a report, or runs a maintenance action (see below). |
 | `verify` | Reads every column volume of a file database, checks each block's checksum, and reports each segment as `ok`, `damaged`, `unreadable` or `failed`. It changes nothing. |
 | `list_functions` | Every built-in SQL function with its signature and semantics, by category. |
-| `version` | Engine and server versions, plus the read-only flag, row limit and query timeout in effect. |
+| `version` | Engine and server versions, the read-only flag, row limit and query timeout in effect, and the isolation level of the open transaction (`null` when none is open). |
 
 `pragma` accepts these names:
 
 - **Settings** (integer; omit the value to read): `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`, `hot_max_rows`, `hot_max_bytes`, `group_cache_mb`, `index_cache_mb`, `index_build_mb`, `query_timeout` (milliseconds, this connection only).
-- **Reports**: `sync_mode`, `wal_flush_trigger`, `volume_stats`, `memory_stats`, `group_cache_stats`, `index_stats`, `index_read_stats`, `verify`.
+- **Reports**: `sync_mode`, `wal_flush_trigger`, `volume_stats`, `memory_stats`, `group_cache_stats`, `index_stats`, `index_read_stats`. `PRAGMA VERIFY` is the `verify` tool.
 - **Actions**: `checkpoint`, `snapshot`, `vacuum`, `index_backfill` (value: the most volumes to build), `restore` (value: a snapshot timestamp such as `20260315-120000.000`, the latest when omitted; it replaces all data).
 
 ## Instructions, resources and prompt
@@ -120,11 +127,13 @@ The server sends [MCP instructions](https://modelcontextprotocol.io/specificatio
 
 ## Safety
 
-- **Read-only mode.** The Stoolap engine has no read-only open mode, so the server enforces it: in `--read-only` every statement that writes is refused before it reaches the engine, including COPY, DDL, SET, ANALYZE, VACUUM, EXPLAIN ANALYZE of a write, and pragma actions and settings. The one setting still allowed is `query_timeout`, which only affects the server's own connection.
-- **One statement per call.** The engine runs every statement of a multi-statement string and reports only the last, so a second statement is refused. The check reads SQL the way the engine lexer does, including string escapes, quoted identifiers and `--`, `#` and `/* */` comments, and refuses a NUL character.
+- **Read-only mode.** The Stoolap engine has no read-only open mode, so the server enforces it: in `--read-only` every statement that writes is refused before it reaches the engine, including COPY, DDL, SET, ANALYZE, VACUUM, EXPLAIN ANALYZE of anything but a read, and every pragma action and setting, `query_timeout` included.
+- **SQL is read the way the engine reads it.** The checks tokenize SQL like the engine lexer: string escapes, quoted identifiers, `--`, `#` and `/* */` comments, and every Unicode whitespace character. They judge the statement that is actually sent, after EXPLAIN [ANALYZE], and find the main verb of a WITH at its own depth. A NUL character or a byte order mark is refused.
+- **One statement per call.** The engine runs every statement of a multi-statement string and reports only the last, so a second statement is refused.
 - **Tool routing.** `query` takes only reads and `execute` only writes. Transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE) are refused in SQL and run only through the transaction tools, so the server always knows whether a transaction is open.
-- **DDL inside a transaction.** The engine rolls back a CREATE TABLE made in a transaction, but ALTER TABLE, CREATE INDEX and CREATE VIEW persist after ROLLBACK, and DROP TABLE and TRUNCATE lose rows. The server refuses all of those except CREATE TABLE while a transaction is open.
-- **Limits.** The row limit and the query timeout keep one call from returning millions of rows or running forever. A cancelled statement changes nothing and the connection stays usable.
+- **DDL inside a transaction.** The engine rolls back a plain CREATE TABLE made in a transaction, but CREATE TABLE ... AS SELECT, ALTER TABLE, CREATE INDEX and CREATE VIEW persist after ROLLBACK, and DROP TABLE and TRUNCATE lose rows. The server refuses all of those but the plain CREATE TABLE while a transaction is open.
+- **Isolation.** `begin_transaction` always names its level, so a `SET isolation_level` run earlier cannot change what it opens.
+- **Limits.** The row limit keeps one call from returning millions of rows, and the query timeout keeps it from running forever. A cancelled statement changes nothing and the connection stays usable. The driver has no raw cursor yet, so the server still reads the whole result before cutting it; the timeout bounds that work.
 - **One call at a time.** Clients may send requests concurrently; the server runs them one after another, so statements of one transaction never interleave.
 - **COPY ... FROM reads files on the host** with the server process's permissions, so an assistant can load any file the process can read. Run with `--read-only` when that is not acceptable.
 - **Names and values.** Table names are quoted, savepoint names must be plain identifiers, and pragma names and values are checked before they reach SQL.
@@ -134,6 +143,8 @@ The server sends [MCP instructions](https://modelcontextprotocol.io/specificatio
 
 - The 30 tools became 14. `transaction_query`, `transaction_execute` and `transaction_execute_batch` are gone: `query`, `execute` and `execute_batch` run inside the open transaction. `create_table`, `create_index`, `create_view`, `alter_table`, `drop`, `analyze_table` and `vacuum` are statements for `execute`. `list_views` is part of `list_tables`; `describe_table`, `show_create_table`, `show_create_view` and `show_indexes` are covered by `get_schema` and by `query` with SHOW and DESCRIBE. `savepoint`, `rollback_to_savepoint` and `release_savepoint` are one `savepoint` tool with an `action`.
 - Rows come back as `{columns, rows, row_count, truncated}` instead of an array of objects, and writes as `{"affected_rows": n}`.
+- `explain` takes the statement without the EXPLAIN keyword.
+- `--read-only` was not airtight in 0.4: a `#` line comment could hide a second statement from the check. Upgrade if you rely on it.
 - Results stop at 1,000 rows and statements at 30 seconds by default.
 - `stoolap://schema` is DDL text instead of JSON.
 - Stoolap 0.5 opens a 0.4 database without a manual step and moves its format forward as it runs; 0.4 cannot open it afterwards. Back up the directory first; the engine's [migration guide](https://stoolap.io/docs/development/migration-v042-to-v050/) lists every answer that changed.

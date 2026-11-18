@@ -166,6 +166,13 @@ test("routing guards", async () => {
     ["execute", "BEGIN", /begin_transaction/],
     ["execute", "SELECT 1", /Use query/],
     ["execute", "PRAGMA checkpoint", /pragma tool/],
+    ["execute", "/**/PRAGMA compact_threshold = 9", /pragma tool/],
+    ["execute", "EXPLAIN ANALYZE PRAGMA compact_threshold = 7", /pragma tool/],
+    ["execute", "\u0085COMMIT", /transaction control/],
+    ["execute", "\u0085BEGIN", /transaction control/],
+    ["execute", "VALUES (1)", /execute runs/],
+    ["query", "WITH c AS (SELECT 99 AS id, 'x' AS n)\u0085INSERT INTO users (id, name) SELECT id, n FROM c", /read-only statements/],
+    ["query", "EXPLAIN ANALYZE\u0085DELETE FROM users", /read-only statements/],
   ];
   for (const [tool, sql, re] of refused) {
     const r = await call(client, tool, { sql });
@@ -180,13 +187,31 @@ test("explain prints plan lines; analyze is refused for writes", async () => {
   let r = await call(client, "explain", { sql: "SELECT * FROM users WHERE id = 1" });
   assert.ok(r.ok, r.text);
   assert.match(r.text, /PkGet users/);
-  r = await call(client, "explain", { sql: "EXPLAIN SELECT * FROM users WHERE id = 1", analyze: true });
+  r = await call(client, "explain", { sql: "SELECT * FROM users WHERE id = 1", analyze: true });
   assert.match(r.text, /actual time=/);
   assert.match(r.text, /^Paths: /m);
   r = await call(client, "explain", { sql: "DELETE FROM users", analyze: true });
   assert.ok(!r.ok);
-  assert.match(r.text, /refused for writes/);
+  assert.match(r.text, /refused for anything but reads/);
+  // A body starting with ANALYZE would turn plain EXPLAIN into EXPLAIN ANALYZE.
+  for (const sql of ["ANALYZE DELETE FROM users", "/**/ANALYZE DELETE FROM users", "ANALYZE DROP TABLE users", "ANALYZE ROLLBACK"]) {
+    r = await call(client, "explain", { sql });
+    assert.ok(!r.ok, sql);
+  }
+  r = await call(client, "explain", { sql: "EXPLAIN SELECT 1" });
+  assert.match(r.text, /without EXPLAIN/);
   assert.deepEqual(await rows(client, "SELECT COUNT(*) FROM users"), [[4]]);
+});
+
+test("large integers: string parameters in, CAST to read them exactly", async () => {
+  let r = await call(client, "query", { sql: "SELECT $1", params: [9007199254740993] });
+  assert.ok(!r.ok);
+  assert.match(r.text, /pass it as a string/);
+  await call(client, "execute", { sql: "CREATE TABLE big (id INTEGER PRIMARY KEY, v INTEGER)" });
+  r = await call(client, "execute", { sql: "INSERT INTO big VALUES (1, $1)", params: ["9007199254740993"] });
+  assert.ok(r.ok, r.text);
+  assert.deepEqual(await rows(client, "SELECT CAST(v AS TEXT) FROM big"), [["9007199254740993"]]);
+  await call(client, "execute", { sql: "DROP TABLE big" });
 });
 
 test("transactions: query and execute join it; rollback, savepoints, commit", async () => {
@@ -203,11 +228,23 @@ test("transactions: query and execute join it; rollback, savepoints, commit", as
 
   r = await call(client, "execute", { sql: "CREATE INDEX ix ON users(score)" });
   assert.ok(!r.ok);
-  assert.match(r.text, /not undone by ROLLBACK/);
+  assert.match(r.text, /undone by ROLLBACK/);
   r = await call(client, "execute", { sql: "TRUNCATE TABLE users" });
-  assert.match(r.text, /not undone by ROLLBACK/);
-  r = await call(client, "execute", { sql: "CREATE TABLE scratch (id INTEGER PRIMARY KEY)" });
+  assert.match(r.text, /undone by ROLLBACK/);
+  r = await call(client, "execute", { sql: "CREATE TABLE ctas AS SELECT 1 AS a" });
+  assert.match(r.text, /AS SELECT/);
+  r = await call(client, "execute", { sql: "/* x */ CREATE TABLE scratch (id INTEGER PRIMARY KEY)" });
   assert.ok(r.ok, r.text);
+  assert.equal(JSON.parse((await call(client, "version")).text).transaction, "snapshot");
+
+  // A failing set undoes the whole batch, and the transaction goes on.
+  r = await call(client, "execute_batch", {
+    sql: "INSERT INTO users (id, name) VALUES ($1, $2)",
+    params_array: [[300, "b1"], [301, "b2"], [1, "dup"], [302, "b3"]],
+  });
+  assert.ok(!r.ok);
+  assert.deepEqual(await rows(client, "SELECT COUNT(*) FROM users WHERE id >= 300"), [[0]]);
+  assert.deepEqual(await rows(client, "SELECT COUNT(*) FROM users WHERE name = 'temp'"), [[2]]);
 
   r = await call(client, "rollback_transaction");
   assert.ok(r.ok, r.text);
@@ -231,6 +268,7 @@ test("transactions: query and execute join it; rollback, savepoints, commit", as
 
   r = await call(client, "commit_transaction");
   assert.match(r.text, /no transaction is open/);
+  assert.equal(JSON.parse((await call(client, "version")).text).transaction, null);
   r = await call(client, "savepoint", { action: "create", name: "sp" });
   assert.match(r.text, /no transaction is open/);
 });
@@ -256,6 +294,13 @@ test("schema tools and resources", async () => {
 
   r = await call(client, "get_schema", { table: "nosuch" });
   assert.ok(!r.ok);
+  r = await call(client, "get_schema", { table: "top" });
+  assert.match(r.text, /CREATE VIEW top/);
+
+  // ANALYZE keeps statistics in _sys_ tables; they are not part of the schema.
+  await call(client, "execute", { sql: "ANALYZE users" });
+  assert.deepEqual(JSON.parse((await call(client, "list_tables")).text).tables.sort(), ["orders", "users"]);
+  assert.doesNotMatch((await call(client, "get_schema")).text, /_sys_/);
 
   const schema = await client.readResource({ uri: "stoolap://schema" });
   assert.match(schema.contents[0].text, /CREATE TABLE users/);
@@ -289,6 +334,15 @@ test("pragma: settings, reports, actions, validation", async () => {
     assert.ok(!r.ok, JSON.stringify(args));
     assert.match(r.text, re);
   }
+});
+
+test("SET isolation_level does not change what begin_transaction opens", async () => {
+  await call(client, "execute", { sql: "SET isolation_level = 'SNAPSHOT'" });
+  await call(client, "begin_transaction");
+  const v = JSON.parse((await call(client, "version")).text);
+  assert.equal(v.transaction, "read_committed");
+  await call(client, "rollback_transaction");
+  await call(client, "execute", { sql: "SET isolation_level = 'READ COMMITTED'" });
 });
 
 test("query timeout stops a long statement and the session goes on", async () => {
@@ -331,27 +385,36 @@ test("read-only mode refuses writes and allows reads and read transactions", asy
       ["execute_batch", { sql: "INSERT INTO t VALUES ($1)", params_array: [[1]] }],
       ["pragma", { name: "checkpoint" }],
       ["pragma", { name: "keep_snapshots", value: 1 }],
+      ["pragma", { name: "query_timeout", value: 0 }],
     ]) {
       const r = await call(ro, tool, args);
       assert.ok(!r.ok, JSON.stringify(args));
       assert.match(r.text, /read-only mode/);
     }
-    let r = await call(ro, "query", { sql: "SELECT 1 # '\n; CREATE TABLE pwned (id INTEGER PRIMARY KEY); --'" });
-    assert.ok(!r.ok);
+    for (const [tool, sql] of [
+      ["query", "SELECT 1 # '\n; CREATE TABLE pwned (id INTEGER PRIMARY KEY); --'"],
+      ["query", "WITH c AS (SELECT 1 AS id)\u0085CREATE TABLE pwned (id INTEGER PRIMARY KEY)"],
+      ["query", "EXPLAIN ANALYZE\u0085CREATE TABLE pwned (id INTEGER PRIMARY KEY)"],
+      ["explain", "ANALYZE CREATE TABLE pwned (id INTEGER PRIMARY KEY)"],
+    ]) {
+      const r = await call(ro, tool, { sql });
+      assert.ok(!r.ok, sql);
+    }
+    let r;
     r = await call(ro, "explain", { sql: "INSERT INTO t VALUES (1)", analyze: true });
     assert.ok(!r.ok);
     assert.deepEqual(JSON.parse((await call(ro, "list_tables")).text).tables, []);
 
-    r = await call(ro, "pragma", { name: "query_timeout", value: 1000 });
-    assert.ok(r.ok, r.text);
     const v = JSON.parse((await call(ro, "version")).text);
     assert.equal(v.read_only, true);
     assert.equal(v.max_rows, 2);
-    assert.equal(v.query_timeout_ms, 1000);
+    assert.equal(v.query_timeout_ms, 0);
 
     r = await call(ro, "begin_transaction");
     assert.ok(r.ok, r.text);
     assert.equal(JSON.parse((await call(ro, "query", { sql: "SELECT * FROM GENERATE_SERIES(1, 5)" })).text).row_count, 2);
+    // --max-rows caps what a call may ask for.
+    assert.equal(JSON.parse((await call(ro, "query", { sql: "SELECT * FROM GENERATE_SERIES(1, 5)", max_rows: 4 })).text).row_count, 2);
     r = await call(ro, "commit_transaction");
     assert.ok(r.ok, r.text);
   } finally {

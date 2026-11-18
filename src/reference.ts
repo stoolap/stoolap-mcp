@@ -32,7 +32,8 @@ SQL essentials:
 - A TEXT that reads as a number compares as that number; any other TEXT compared with a number gives NULL. Integer overflow is an error, division by zero is NULL. SUM over INTEGER is INTEGER, AVG is FLOAT.
 - Unknown or ambiguous column names and table qualifiers are errors; name an aliased table by its alias.
 - Every query may stop with "query cancelled" when it runs past the server's time limit: narrow it, or add an index.
-- DDL inside a transaction: CREATE TABLE rolls back with it; the server refuses the other DDL there because ALTER, CREATE INDEX and CREATE VIEW would persist after ROLLBACK, and DROP TABLE and TRUNCATE would lose rows.
+- DDL inside a transaction: a plain CREATE TABLE rolls back with it; the server refuses the other DDL there because CREATE TABLE ... AS SELECT, ALTER, CREATE INDEX and CREATE VIEW would persist after ROLLBACK, and DROP TABLE and TRUNCATE would lose rows.
+- Results are JSON: INTEGER values past 2^53 lose digits, so read them with CAST(x AS TEXT) and pass them as string parameters. TIMESTAMP values come back to the millisecond; CAST(ts AS TEXT) gives all nine digits.
 
 Not supported: stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, MERGE, UPDATE ... FROM, composite foreign keys, GROUPS window frames, EXCLUDE, two named windows in one WINDOW clause, JSON_SET and other JSON modifiers, a statement that is only VALUES (...).
 
@@ -88,7 +89,7 @@ Arithmetic + - * / %; bitwise & | ^ ~ << >> (shift count 0-63). INTEGER overflow
   datetime: `## Date/Time Functions
 NOW() / CURRENT_TIMESTAMP (UTC), CURRENT_DATE, CURRENT_TIME
 DATE_TRUNC(unit, ts) - year, quarter, month, week, day, hour, minute, second
-TIME_TRUNC(duration, ts) - buckets such as '15m', '1h', '1d'
+TIME_TRUNC(duration, ts) - buckets such as '30s', '15m', '1h', '24h' (units s, m, h)
 EXTRACT(field FROM ts) - YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, MILLISECOND, MICROSECOND, DOW (0 = Sunday), ISODOW, DOY, WEEK, QUARTER, EPOCH
 YEAR(ts), MONTH(ts), DAY(ts), HOUR(ts), MINUTE(ts), SECOND(ts)
 DATE_ADD(ts, n [, unit]) / DATE_SUB - default unit day
@@ -96,7 +97,7 @@ DATEDIFF(end, start) / DATE_DIFF - whole days, end minus start
 TO_CHAR(ts, format) - YYYY, YY, MM, MON, MONTH, DD, DY, DAY, HH24, HH, HH12, MI, SS
 
 INTERVAL: ts + INTERVAL '7 days', n * INTERVAL '1 hour', -INTERVAL '1 day'. Month and year steps follow the calendar (Jan 31 + 1 month = Feb 28). One unit per literal: '1 month 1 day' is an error.
-Literals: TIMESTAMP '2026-01-01 12:00:00', DATE '2026-01-01', TIME '12:00:00'. Timestamps are UTC, nanosecond precision, stored between 1677-09-21 and 2262-04-11.`,
+Literals: TIMESTAMP '2026-01-01 12:00:00', DATE '2026-01-01', TIME '12:00:00'. Timestamps are UTC, stored to the nanosecond between 1677-09-21 and 2262-04-11; results show milliseconds, CAST(ts AS TEXT) shows all digits.`,
 
   json: `## JSON Functions
 JSON_EXTRACT(json, '$.path') - dot paths with [n] indexes
@@ -170,7 +171,7 @@ No BLOB, ARRAY, ENUM, DATE-only or INTERVAL column types. A single-column PRIMAR
 - begin_transaction with READ COMMITTED (default: each statement sees the latest commits) or SNAPSHOT (the view at BEGIN).
 - savepoint create / rollback_to (keeps the savepoint) / release (drops it and later ones).
 - A failed statement is undone and leaves the transaction open. Unique violations are reported when the statement ends.
-- Inside a transaction CREATE TABLE rolls back; ALTER TABLE, CREATE INDEX and CREATE VIEW would persist and TRUNCATE and DROP TABLE would lose rows, so the server refuses them. COPY and VACUUM are refused by the engine.
+- Inside a transaction a plain CREATE TABLE rolls back; CREATE TABLE ... AS SELECT, ALTER TABLE, CREATE INDEX and CREATE VIEW would persist and TRUNCATE and DROP TABLE would lose rows, so the server refuses them. COPY and VACUUM are refused by the engine.
 
 ### Temporal queries
 SELECT ... FROM t AS OF TIMESTAMP '...' | AS OF TRANSACTION n, also in joins and subqueries. All AS OF clauses resolve against the statement's start. Points older than the history kept (VACUUM, TRUNCATE, sealing and compaction cut it) give an error.
@@ -181,7 +182,7 @@ Unknown or ambiguous columns and qualifiers, a missing parameter, mixing $n and 
 ### Metadata and plans
 SHOW TABLES, SHOW VIEWS, SHOW INDEXES FROM t, SHOW CREATE TABLE t, SHOW CREATE VIEW v, DESCRIBE t.
 EXPLAIN prints one plan step per row (column "plan"). A line starting with "else" is the fallback used when the step above cannot run. EXPLAIN ANALYZE runs the statement, adds (actual time=..., rows=...) to the top line and ends with "Paths: ..." naming the paths taken.
-ANALYZE t collects optimizer statistics. VACUUM [t] removes deleted rows and old versions and discards AS OF history.
+ANALYZE t collects optimizer statistics into the tables _sys_table_stats and _sys_column_stats; do not write to them. VACUUM [t] removes deleted rows and old versions and discards AS OF history.
 
 ### PRAGMA (pragma tool)
 - Settings: checkpoint_interval (s, 60), compact_threshold (4), target_volume_rows (1048576, min 65536), keep_snapshots (3), hot_max_rows (262144, 0 off), hot_max_bytes (0 off), group_cache_mb (64), index_cache_mb (16), index_build_mb (64), query_timeout (ms for this session, 0 off)
