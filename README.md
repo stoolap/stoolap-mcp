@@ -1,29 +1,22 @@
 # stoolap-mcp
 
-MCP (Model Context Protocol) server for [Stoolap](https://github.com/stoolap/stoolap), an embedded SQL database. Lets AI assistants query, manage, and analyze Stoolap databases with full access to all SQL features.
+An MCP (Model Context Protocol) server for [Stoolap](https://github.com/stoolap/stoolap), an embedded SQL database written in Rust. It lets an AI assistant inspect a schema, run queries, write data inside transactions, read query plans and check the health of a database file.
 
-Works with any MCP-compatible AI client: Claude Desktop, Claude Code, Cursor, Windsurf, Cline, and others.
+It works with any MCP client that speaks stdio: Claude Desktop, Claude Code, Cursor, Windsurf, Cline and others.
 
-Version 0.4.x of this server targets the Stoolap 0.4.x engine (volume-based storage) through [`@stoolap/node`](https://github.com/stoolap/stoolap-node).
+Version 0.5 of this server targets the Stoolap 0.5 engine through [`@stoolap/node`](https://github.com/stoolap/stoolap-node) 0.5.
 
-## Docker
+## Quick start
+
+### Claude Code
 
 ```bash
-docker build -t stoolap-mcp .
-docker run -i --rm -v "$PWD/data:/data" stoolap-mcp --path /data/mydb
+claude mcp add stoolap -- npx -y @stoolap/mcp --path ./mydata
 ```
 
-The server talks MCP over stdio, so the container must run with `-i`. Mount a directory for a persistent database, or omit `--path` for an in-memory one.
+### Claude Desktop and other JSON-configured clients
 
-## Registry
-
-The server is published to the [MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.stoolap/mcp`. `server.json` in this repository is the registry manifest; its `version` and the `mcpName` field in `package.json` are kept in step with the npm package.
-
-## Quick Start
-
-### Claude Desktop
-
-Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+On macOS the Claude Desktop file is `~/Library/Application Support/Claude/claude_desktop_config.json`.
 
 ```json
 {
@@ -36,158 +29,130 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 }
 ```
 
-### Claude Code
+Leave out `--path` for an in-memory database that disappears when the server stops. Add `"--read-only"` to the arguments to let the assistant read but never write.
+
+The first `npx` run compiles the small native addon of `@stoolap/node`. A client with a short startup timeout may report a failed connection on that first run; retry once the install has finished, or install the package globally first (`npm install -g @stoolap/mcp`).
+
+### Docker
 
 ```bash
-claude mcp add stoolap -- npx -y @stoolap/mcp --path ./mydata
+docker build -t stoolap-mcp .
+docker run -i --rm -v "$PWD/data:/data" stoolap-mcp --path /data/mydb
 ```
 
-### In-memory (no persistence)
-
-```json
-{
-  "mcpServers": {
-    "stoolap": {
-      "command": "npx",
-      "args": ["-y", "@stoolap/mcp"]
-    }
-  }
-}
-```
-
-### Read-only mode
-
-```json
-{
-  "mcpServers": {
-    "stoolap": {
-      "command": "npx",
-      "args": ["-y", "@stoolap/mcp", "--path", "./mydata", "--read-only"]
-    }
-  }
-}
-```
+The server talks over stdio, so the container must run with `-i`.
 
 ## Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--path <path>` | `:memory:` | Database path or DSN. Engine options go in the query string, e.g. `./mydata?sync_mode=full&checkpoint_interval=30`. |
-| `--read-only` | `false` | Reject every statement that writes data, schema or engine state. Read-only transactions (begin, query, commit) are still allowed for consistent reads. |
+| `--read-only` | off | Refuse every statement that writes data, schema or engine settings. Reads and read-only transactions still work. |
+| `--max-rows <n>` | `1000` | The most rows one call returns. Longer results come back cut, with `truncated: true`. A call can ask for fewer with `max_rows`, never for more. `0` removes the limit. |
+| `--query-timeout <ms>` | `30000` | Stop any statement that runs longer, with the error `query cancelled`. `0` turns it off. Without the flag, a `query_timeout` in the DSN is used instead of the default. |
 | `--version` | | Print the server version and exit. |
 
-The first `npx` run compiles the small native addon of `@stoolap/node`, which can take a while; MCP clients with a short startup timeout may report a failed connection on that first run. Retry once the install has finished, or install the package globally beforehand (`npm install -g @stoolap/mcp`).
+## Tools (14)
 
-## Tools (30)
+Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so a client can approve the read-only ones automatically.
 
-Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so clients can auto-approve the read-only ones.
+### SQL
 
-### Query and Analysis
+| Tool | What it does |
+|------|--------------|
+| `query` | Runs one read-only statement: SELECT, WITH ... SELECT, SHOW, DESCRIBE, EXPLAIN. |
+| `execute` | Runs one statement that writes: INSERT, UPDATE, DELETE, COPY, CREATE, ALTER, DROP, TRUNCATE, ANALYZE, VACUUM, SET. Returns `{"affected_rows": n}`, or rows when the statement has RETURNING. |
+| `execute_batch` | Runs one INSERT, UPDATE or DELETE once per parameter set, all or nothing: when one set fails, none of them stays applied, inside a transaction too. |
+| `explain` | Prints the plan of a statement (given without EXPLAIN), one step per line. With `analyze: true` it runs the statement and shows actual time, rows and the paths taken; this is refused for anything but reads. |
 
-| Tool | Description |
-|------|-------------|
-| `query` | Run SELECT, SHOW, DESCRIBE, EXPLAIN, VALUES and WITH ... SELECT. Returns rows as JSON. Runs inside the active transaction if one is open. |
-| `execute` | Run INSERT, UPDATE, DELETE, COPY ... FROM, DDL, SET, ANALYZE, VACUUM with parameter binding. Supports upsert (ON CONFLICT / ON DUPLICATE KEY UPDATE) and RETURNING. Returns rows for RETURNING, otherwise the affected row count. |
-| `execute_batch` | Execute the same SQL with multiple parameter sets in a single atomic transaction. |
-| `explain` | Show the query plan. `analyze=true` runs the statement and reports actual row counts and timings (refused for write statements). |
+`query` and RETURNING return rows in one shape:
 
-### Transaction Control
+```json
+{"columns": ["id", "name"], "rows": [[1, "alice"], [2, "bob"]], "row_count": 2, "truncated": false}
+```
 
-| Tool | Description |
-|------|-------------|
-| `begin_transaction` | Begin a transaction with optional isolation level (`read_committed` or `snapshot`). One active transaction at a time. |
-| `transaction_execute` | Execute INSERT, UPDATE or DELETE inside the active transaction. DDL, TRUNCATE and COPY are refused. |
-| `transaction_query` | Run a read-only statement inside the active transaction. |
-| `transaction_execute_batch` | Execute the same SQL with multiple parameter sets inside the active transaction. |
-| `commit_transaction` | Commit the active transaction. |
-| `rollback_transaction` | Rollback the active transaction. |
-| `savepoint` | Create a named savepoint. |
-| `rollback_to_savepoint` | Undo changes made after a savepoint without ending the transaction. |
-| `release_savepoint` | Remove a savepoint, keeping its changes. |
+Columns keep their order and duplicate names (`SELECT a.id, b.id`), and an empty result still lists its columns. VECTOR values are arrays of numbers, and the FLOAT values NaN, Infinity and -Infinity are the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, because JSON has no way to write them.
 
-### Schema Inspection
+Parameters are an array for `$1, $2` or `?` placeholders, or an object for `:name` placeholders. JSON and VECTOR values are passed as text.
 
-| Tool | Description |
-|------|-------------|
-| `list_tables` | List all tables |
-| `list_views` | List all views |
-| `describe_table` | Columns, types, nullability, keys, defaults and extras |
-| `show_create_table` | Full CREATE TABLE DDL including constraints and foreign keys |
-| `show_create_view` | Full CREATE VIEW DDL |
-| `show_indexes` | Indexes of a table: name, type, columns, uniqueness, options |
-| `get_schema` | The complete schema: every table with columns, indexes and DDL, plus every view |
+Two limits come from the Node.js driver, and the instructions tell the assistant about both:
 
-### Schema Modification
+- INTEGER values travel as JavaScript numbers, which are exact only up to 2^53. A larger parameter is refused with a hint to pass it as a string, which the engine converts exactly; read large values with `CAST(x AS TEXT)`.
+- TIMESTAMP values come back as ISO 8601 strings to the millisecond. `CAST(ts AS TEXT)` gives all nine digits.
 
-| Tool | Description |
-|------|-------------|
-| `create_table` | INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N) columns; PRIMARY KEY (including composite), NOT NULL, UNIQUE, DEFAULT, CHECK, AUTO_INCREMENT, single-column foreign keys; IF NOT EXISTS; CREATE TABLE AS SELECT; CLUSTER BY |
-| `create_index` | BTREE, HASH, BITMAP or HNSW indexes, UNIQUE and composite. HNSW options: m, ef_construction, ef_search, metric |
-| `create_view` | Read-only view that persists across restarts |
-| `alter_table` | ADD COLUMN, DROP COLUMN, RENAME COLUMN, MODIFY COLUMN, RENAME TO, CLUSTER BY |
-| `drop` | DROP TABLE / VIEW / INDEX ... ON table (supports IF EXISTS) |
+### Transactions
 
-### Database Administration
+| Tool | What it does |
+|------|--------------|
+| `begin_transaction` | Opens a transaction, `read_committed` (default) or `snapshot`. |
+| `commit_transaction` | Commits it. |
+| `rollback_transaction` | Rolls it back. |
+| `savepoint` | `create`, `rollback_to` or `release` a named savepoint. |
 
-| Tool | Description |
-|------|-------------|
-| `analyze_table` | Collect optimizer statistics for a table |
-| `vacuum` | Remove deleted rows and old MVCC versions, compact indexes (discards time-travel history) |
-| `pragma` | Read or set `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`, `hot_max_rows`, `hot_max_bytes`, `group_cache_mb`, `index_cache_mb`, `index_build_mb`; read `sync_mode`, `wal_flush_trigger`, `volume_stats`, `memory_stats`, `group_cache_stats`, `index_stats`, `index_read_stats`; run `snapshot`, `checkpoint`, `vacuum`, `index_backfill`, `restore` |
-| `version` | Engine and server version |
-| `list_functions` | All built-in SQL functions with signatures, grouped by category |
+While a transaction is open, `query`, `execute` and `execute_batch` run inside it and see its uncommitted rows. There is one transaction at a time, on the server's single connection.
 
-## Auto-injected Instructions
+### Schema
 
-The server sends [MCP instructions](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/instructions) during the connection handshake, so any AI client receives a compact Stoolap SQL reference on connect: data types, tool routing, upsert syntax, index and vector rules, transaction rules, and the known limitations of the 0.4.x engine.
+| Tool | What it does |
+|------|--------------|
+| `list_tables` | The names of all tables and views. |
+| `get_schema` | CREATE TABLE for every table (or the one table or view named) with constraints and foreign keys, a line per secondary index, and CREATE VIEW for every view. |
 
-For the full reference with the live schema, attach the `sql-assistant` prompt or read `stoolap://sql-reference`.
+Both leave out the `_sys_table_stats` and `_sys_column_stats` tables in which ANALYZE keeps optimizer statistics.
 
-## Resources
+### Engine
 
-| URI | Description |
-|-----|-------------|
-| `stoolap://schema` | Full database schema with all tables, views, columns, indexes, and DDL statements (JSON) |
-| `stoolap://sql-reference` | Live database schema plus the complete Stoolap SQL reference (Markdown) |
+| Tool | What it does |
+|------|--------------|
+| `pragma` | Reads or changes an engine setting, reads a report, or runs a maintenance action (see below). |
+| `verify` | Reads every column volume of a file database, checks each block's checksum, and reports each segment as `ok`, `damaged`, `unreadable` or `failed`. It changes nothing. |
+| `list_functions` | Every built-in SQL function with its signature and semantics, by category. |
+| `version` | Engine and server versions, the read-only flag, row limit and query timeout in effect, and the isolation level of the open transaction (`null` when none is open). |
 
-## Prompts
+`pragma` accepts these names:
 
-| Prompt | Description |
-|--------|-------------|
-| `sql-assistant` | Same content as `stoolap://sql-reference` delivered as an MCP prompt. Use whichever your client supports. |
+- **Settings** (integer; omit the value to read): `checkpoint_interval`, `compact_threshold`, `target_volume_rows`, `keep_snapshots`, `hot_max_rows`, `hot_max_bytes`, `group_cache_mb`, `index_cache_mb`, `index_build_mb`, `query_timeout` (milliseconds, this connection only).
+- **Reports**: `sync_mode`, `wal_flush_trigger`, `volume_stats`, `memory_stats`, `group_cache_stats`, `index_stats`, `index_read_stats`. `PRAGMA VERIFY` is the `verify` tool.
+- **Actions**: `checkpoint`, `snapshot`, `vacuum`, `index_backfill` (value: the most volumes to build), `restore` (value: a snapshot timestamp such as `20260315-120000.000`, the latest when omitted; it replaces all data).
 
-## SQL Coverage
+## Instructions, resources and prompt
 
-- **7 data types**: INTEGER, FLOAT, TEXT, BOOLEAN, TIMESTAMP, JSON, VECTOR(N)
-- **Joins**: INNER, LEFT, RIGHT, FULL OUTER, CROSS, NATURAL, self-joins, multi-table
-- **Subqueries**: scalar, IN/NOT IN, EXISTS/NOT EXISTS, ANY/SOME/ALL, correlated, derived tables
-- **CTEs**: WITH, WITH RECURSIVE, multiple CTEs, column aliases, WITH before INSERT/UPDATE/DELETE
-- **Window functions**: ROW_NUMBER, RANK, DENSE_RANK, NTILE, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTH_VALUE, PERCENT_RANK, CUME_DIST, every aggregate with OVER, named windows
-- **Aggregates**: 17 functions with DISTINCT and FILTER; GROUP BY ROLLUP, CUBE, GROUPING SETS; DISTINCT ON
-- **Scalar functions**: 98 functions across string, math, date/time, JSON, hash, conditional, type and vector categories
-- **Upsert**: ON CONFLICT DO UPDATE / DO NOTHING with EXCLUDED, ON DUPLICATE KEY UPDATE
-- **Bulk load**: COPY table FROM 'file.csv' WITH (FORMAT CSV, HEADER true)
-- **Transactions**: READ COMMITTED and SNAPSHOT isolation, savepoints
-- **Temporal queries**: AS OF TIMESTAMP, AS OF TRANSACTION
-- **Indexes**: BTree, Hash, Bitmap, HNSW (vector), unique, composite
-- **Vector search**: k-NN with L2, cosine and inner product distances, HNSW indexing
-- **EXPLAIN / EXPLAIN ANALYZE**
+The server sends [MCP instructions](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/instructions) when a client connects: which tool to use for what, the result shape, the SQL rules most likely to surprise (comparison of TEXT with numbers, overflow errors, strict name resolution, DDL in transactions) and what Stoolap does not support.
+
+| URI or name | Content |
+|-------------|---------|
+| `stoolap://schema` | The live schema, as returned by `get_schema`. |
+| `stoolap://sql-reference` | The live schema plus the complete Stoolap 0.5 SQL reference and every function. |
+| `sql-assistant` (prompt) | The same content as `stoolap://sql-reference`, for clients that take prompts rather than resources. |
 
 ## Safety
 
-- **Single statement per call**: the engine executes every statement of a multi-statement string but reports only the last one, so semicolon-separated batches are rejected.
-- **Tool routing**: `query` accepts only read statements, `execute` is blocked while a transaction is open, and transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT) are only reachable through the transaction tools, so the server always knows the connection's transaction state.
-- **Read-only mode** rejects every write, including COPY, DDL, SET, ANALYZE, VACUUM and PRAGMA actions.
-- **COPY ... FROM reads files on the host** with the server process's permissions, so an assistant can load any readable file into a table. Run with `--read-only` when that is not acceptable.
-- **DDL outside transactions**: only CREATE TABLE is rolled back reliably by the engine, so DDL, TRUNCATE and COPY are refused inside a transaction.
-- **EXPLAIN ANALYZE** is refused for write statements because it executes them.
-- **Injection guards**: table and view names are double-quoted, savepoint and pragma names must be bare identifiers, pragma values are validated per pragma.
-- The database is closed cleanly (open transaction rolled back, checkpoint on close) when the client disconnects or the process receives SIGINT/SIGTERM.
+- **Read-only mode.** The Stoolap engine has no read-only open mode, so the server enforces it: in `--read-only` every statement that writes is refused before it reaches the engine, including COPY, DDL, SET, ANALYZE, VACUUM, EXPLAIN ANALYZE of anything but a read, and every pragma action and setting, `query_timeout` included.
+- **SQL is read the way the engine reads it.** The checks tokenize SQL like the engine lexer: string escapes, quoted identifiers, `--`, `#` and `/* */` comments, and every Unicode whitespace character. They judge the statement that is actually sent, after EXPLAIN [ANALYZE], and find the main verb of a WITH at its own depth. A NUL character or a byte order mark is refused.
+- **One statement per call.** The engine runs every statement of a multi-statement string and reports only the last, so a second statement is refused.
+- **Tool routing.** `query` takes only reads and `execute` only writes. Transaction control statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE) are refused in SQL and run only through the transaction tools, so the server always knows whether a transaction is open.
+- **DDL inside a transaction.** The engine rolls back a plain CREATE TABLE made in a transaction, but CREATE TABLE ... AS SELECT, ALTER TABLE, CREATE INDEX and CREATE VIEW persist after ROLLBACK, and DROP TABLE and TRUNCATE lose rows. The server refuses all of those but the plain CREATE TABLE while a transaction is open.
+- **Isolation.** `begin_transaction` always names its level, so a `SET isolation_level` run earlier cannot change what it opens.
+- **Limits.** The row limit keeps one call from returning millions of rows, and the query timeout keeps it from running forever. A cancelled statement changes nothing and the connection stays usable. The driver has no raw cursor yet, so the server still reads the whole result before cutting it; the timeout bounds that work.
+- **One call at a time.** Clients may send requests concurrently; the server runs them one after another, so statements of one transaction never interleave.
+- **COPY ... FROM reads files on the host** with the server process's permissions, so an assistant can load any file the process can read. Run with `--read-only` when that is not acceptable.
+- **Names and values.** Table names are quoted, savepoint names must be plain identifiers, and pragma names and values are checked before they reach SQL.
+- When the client disconnects or the process gets SIGINT, SIGTERM or SIGHUP, an open transaction is rolled back and the database is closed cleanly.
+
+## Upgrading from 0.4
+
+- The 30 tools became 14. `transaction_query`, `transaction_execute` and `transaction_execute_batch` are gone: `query`, `execute` and `execute_batch` run inside the open transaction. `create_table`, `create_index`, `create_view`, `alter_table`, `drop`, `analyze_table` and `vacuum` are statements for `execute`. `list_views` is part of `list_tables`; `describe_table`, `show_create_table`, `show_create_view` and `show_indexes` are covered by `get_schema` and by `query` with SHOW and DESCRIBE. `savepoint`, `rollback_to_savepoint` and `release_savepoint` are one `savepoint` tool with an `action`.
+- Rows come back as `{columns, rows, row_count, truncated}` instead of an array of objects, and writes as `{"affected_rows": n}`.
+- `explain` takes the statement without the EXPLAIN keyword.
+- `--read-only` was not airtight in 0.4: a `#` line comment could hide a second statement from the check. Upgrade if you rely on it.
+- Results stop at 1,000 rows and statements at 30 seconds by default.
+- `stoolap://schema` is DDL text instead of JSON.
+- Stoolap 0.5 opens a 0.4 database without a manual step and moves its format forward as it runs; 0.4 cannot open it afterwards. Back up the directory first; the engine's [migration guide](https://stoolap.io/docs/development/migration-v042-to-v050/) lists every answer that changed.
 
 ## Requirements
 
-- Node.js >= 20
-- `@stoolap/node` (installed automatically) with prebuilt engine libraries for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64). A C compiler is needed for its small N-API addon. CI exercises Linux and macOS.
+- Node.js 20 or later.
+- `@stoolap/node` 0.5, installed automatically, with prebuilt engine libraries for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64). Its small N-API addon needs a C compiler at install time.
 
 ## Development
 
@@ -195,11 +160,13 @@ For the full reference with the live schema, attach the `sql-assistant` prompt o
 git clone https://github.com/stoolap/stoolap-mcp.git
 cd stoolap-mcp
 npm install
-npm test          # builds, then runs the end-to-end smoke tests against the built server
+npm test          # builds, then runs the unit tests and the end-to-end tests against the built server
 node build/index.js --path ./mydata
 ```
 
-Releases are published to npm from the `v*` tag workflow using npm trusted publishing (OIDC); no token is needed.
+The source is split by concern: `src/cli.ts` (arguments), `src/sql.ts` (statement checks), `src/session.ts` (the connection, transaction state and result conversion), `src/server.ts` (tools, resources and prompt) and `src/reference.ts` (the texts sent to the assistant).
+
+Releases are published to npm from the `v*` tag workflow with npm trusted publishing. `server.json` is the [MCP Registry](https://registry.modelcontextprotocol.io/) manifest for `io.github.stoolap/mcp`; its versions and the `mcpName` in `package.json` move with the npm package.
 
 ## License
 
