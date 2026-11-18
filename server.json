@@ -6,12 +6,12 @@
     "url": "https://github.com/stoolap/stoolap-mcp",
     "source": "github"
   },
-  "version": "0.4.2",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@stoolap/mcp",
-      "version": "0.4.2",
+      "version": "0.5.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -20,7 +20,7 @@
         {
           "type": "named",
           "name": "--path",
-          "description": "Database path. Omit for an in-memory database.",
+          "description": "Database path or DSN. Omit for an in-memory database.",
           "isRequired": false,
           "format": "filepath",
           "valueHint": "./mydata"
@@ -28,9 +28,25 @@
         {
           "type": "named",
           "name": "--read-only",
-          "description": "Disable all write operations.",
+          "description": "Refuse every statement that writes data or schema.",
           "isRequired": false,
           "format": "boolean"
+        },
+        {
+          "type": "named",
+          "name": "--max-rows",
+          "description": "Rows returned per call at most (default 1000, 0 = no limit).",
+          "isRequired": false,
+          "format": "number",
+          "valueHint": "1000"
+        },
+        {
+          "type": "named",
+          "name": "--query-timeout",
+          "description": "Stop a statement after this many milliseconds (default 30000, 0 = none).",
+          "isRequired": false,
+          "format": "number",
+          "valueHint": "30000"
         }
       ]
     }
