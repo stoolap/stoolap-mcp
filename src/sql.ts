@@ -148,12 +148,10 @@ export function parse(sql: string): Statement | { error: string } {
   return { kind: kindOf(words), explain: false, analyzed: false, words };
 }
 
-// CREATE TABLE ... AS SELECT persists after ROLLBACK; a plain CREATE TABLE
-// is undone with the transaction.
-export function isPlainCreateTable(st: Statement): boolean {
-  const w = st.words;
-  if (w[0]?.text !== "CREATE" || w[1]?.text !== "TABLE") return false;
-  return !w.some((x) => x.depth === 0 && x.text === "AS");
+// CREATE TABLE, with or without AS SELECT, is the only DDL that ROLLBACK
+// undoes.
+export function isCreateTable(st: Statement): boolean {
+  return st.words[0]?.text === "CREATE" && st.words[1]?.text === "TABLE";
 }
 
 export function hasReturning(st: Statement): boolean {

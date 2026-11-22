@@ -203,14 +203,14 @@ test("explain prints plan lines; analyze is refused for writes", async () => {
   assert.deepEqual(await rows(client, "SELECT COUNT(*) FROM users"), [[4]]);
 });
 
-test("large integers: string parameters in, CAST to read them exactly", async () => {
+test("large integers: string parameters in, exact strings out", async () => {
   let r = await call(client, "query", { sql: "SELECT $1", params: [9007199254740993] });
   assert.ok(!r.ok);
   assert.match(r.text, /pass it as a string/);
   await call(client, "execute", { sql: "CREATE TABLE big (id INTEGER PRIMARY KEY, v INTEGER)" });
   r = await call(client, "execute", { sql: "INSERT INTO big VALUES (1, $1)", params: ["9007199254740993"] });
   assert.ok(r.ok, r.text);
-  assert.deepEqual(await rows(client, "SELECT CAST(v AS TEXT) FROM big"), [["9007199254740993"]]);
+  assert.deepEqual(await rows(client, "SELECT v, id FROM big"), [["9007199254740993", 1]]);
   await call(client, "execute", { sql: "DROP TABLE big" });
 });
 
@@ -230,9 +230,9 @@ test("transactions: query and execute join it; rollback, savepoints, commit", as
   assert.ok(!r.ok);
   assert.match(r.text, /undone by ROLLBACK/);
   r = await call(client, "execute", { sql: "TRUNCATE TABLE users" });
-  assert.match(r.text, /undone by ROLLBACK/);
+  assert.match(r.text, /use DELETE/);
   r = await call(client, "execute", { sql: "CREATE TABLE ctas AS SELECT 1 AS a" });
-  assert.match(r.text, /AS SELECT/);
+  assert.ok(r.ok, r.text);
   r = await call(client, "execute", { sql: "/* x */ CREATE TABLE scratch (id INTEGER PRIMARY KEY)" });
   assert.ok(r.ok, r.text);
   assert.equal(JSON.parse((await call(client, "version")).text).transaction, "snapshot");

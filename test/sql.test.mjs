@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isPlainCreateTable, parse } from "../build/sql.js";
+import { isCreateTable, parse } from "../build/sql.js";
 import { parseArgs } from "../build/cli.js";
 
 const kind = (sql) => {
@@ -77,13 +77,13 @@ test("a second statement is found past literals, identifiers and comments", () =
   assert.match(kind("SELECT 1\0; DROP TABLE t"), /NUL/);
 });
 
-test("CREATE TABLE AS SELECT is not a plain CREATE TABLE", () => {
-  const plain = (sql) => isPlainCreateTable(parse(sql));
-  assert.equal(plain("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER CHECK (v > 0))"), true);
-  assert.equal(plain("/* x */ create table t (id INTEGER PRIMARY KEY)"), true);
-  assert.equal(plain("CREATE TABLE t AS SELECT 1 AS a"), false);
-  assert.equal(plain("CREATE TABLE t AS (SELECT 1 AS a)"), false);
-  assert.equal(plain("CREATE INDEX i ON t(a)"), false);
+test("CREATE TABLE, with or without AS SELECT, is told from other DDL", () => {
+  const create = (sql) => isCreateTable(parse(sql));
+  assert.equal(create("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER CHECK (v > 0))"), true);
+  assert.equal(create("/* x */ create table t (id INTEGER PRIMARY KEY)"), true);
+  assert.equal(create("CREATE TABLE t AS SELECT 1 AS a"), true);
+  assert.equal(create("CREATE INDEX i ON t(a)"), false);
+  assert.equal(create("CREATE VIEW v AS SELECT 1 AS a"), false);
 });
 
 test("parseArgs", () => {

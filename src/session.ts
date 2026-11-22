@@ -77,8 +77,8 @@ export class Session {
   }
 
   // The server's --max-rows caps every call; a call may only ask for fewer.
-  // Infinity is for the server's own reports. The driver has no raw cursor,
-  // so the whole result is read first.
+  // Infinity is for the server's own reports. The whole result is read
+  // first: the driver's cursor opens on the main thread (stoolap-node#12).
   async rows(sql: string, params?: Params, maxRows?: number): Promise<RowSet> {
     const raw = await this.db.queryRaw(sql, params as never);
     const cap = this.maxRows > 0 ? this.maxRows : Infinity;

@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { FUNCTION_SECTIONS, INSTRUCTIONS, SQL_REFERENCE } from "./reference.js";
 import type { Params, Session } from "./session.js";
-import { hasReturning, isBareId, isPlainCreateTable, parse, quoteId, type Statement } from "./sql.js";
+import { hasReturning, isBareId, isCreateTable, parse, quoteId, type Statement } from "./sql.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -77,7 +77,7 @@ const WRITE = { readOnlyHint: false, destructiveHint: true, openWorldHint: false
 const ADDITIVE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 
 const DDL_IN_TX_ERR =
-  "only a plain CREATE TABLE is undone by ROLLBACK (CREATE TABLE ... AS SELECT, ALTER, CREATE INDEX and CREATE VIEW persist; DROP TABLE and TRUNCATE lose rows). Commit or roll back first, then run it outside the transaction.";
+  "only CREATE TABLE, with or without AS SELECT, is undone by ROLLBACK (ALTER, CREATE INDEX and CREATE VIEW persist; DROP TABLE loses rows; TRUNCATE cannot run in a transaction, use DELETE). Commit or roll back first, then run it outside the transaction.";
 
 const PRAGMA_SETTINGS = new Set([
   "checkpoint_interval",
@@ -189,7 +189,7 @@ export function createServer(s: Session, version: string): McpServer {
       if (st.kind === "pragma") return err("use the pragma tool.");
       if (st.kind === "other") return err("execute runs INSERT, UPDATE, DELETE, COPY, CREATE, ALTER, DROP, TRUNCATE, ANALYZE, VACUUM or SET.");
       if (s.readOnly) return err(READ_ONLY_ERR);
-      if (st.kind === "ddl" && s.txActive && !isPlainCreateTable(st)) return err(DDL_IN_TX_ERR);
+      if (st.kind === "ddl" && s.txActive && !isCreateTable(st)) return err(DDL_IN_TX_ERR);
       const bad = unsafeParam(p);
       if (bad) return err(bad);
       if (st.analyzed || hasReturning(st)) return json(await s.rows(sql, p, max_rows));

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Reference texts for engine 0.5.0. Every behaviour stated here was run
+// Reference texts for engine 0.5.1. Every behaviour stated here was run
 // against the engine; keep it that way when editing.
 
 export const INSTRUCTIONS = `Stoolap is an embedded SQL database (engine 0.5.x). Use these tools to work with it.
@@ -29,13 +29,14 @@ SQL essentials:
 - Parameters: $1, $2 or ? with an array, :name with an object. Do not mix the two styles.
 - Cast only with CAST(x AS type); "::" is not supported.
 - Upsert: INSERT ... ON CONFLICT (cols) DO UPDATE SET c = EXCLUDED.c | DO NOTHING, or ON DUPLICATE KEY UPDATE c = EXCLUDED.c.
-- A TEXT that reads as a number compares as that number; any other TEXT compared with a number gives NULL. Integer overflow is an error, division by zero is NULL. SUM over INTEGER is INTEGER, AVG is FLOAT.
+- A TEXT that reads as a number compares as that number; any other TEXT compared with a number gives NULL. INTEGER overflow and FLOAT arithmetic overflow from finite operands are errors, division by zero is NULL. SUM over INTEGER is INTEGER, AVG is FLOAT.
+- A condition (WHERE, HAVING, ON, CASE WHEN, CHECK, FILTER, AND/OR/NOT operands) must be BOOLEAN, INTEGER (non-zero is true) or NULL; FLOAT or TEXT is an error, so write f <> 0 or s <> ''.
 - Unknown or ambiguous column names and table qualifiers are errors; name an aliased table by its alias.
 - Every query may stop with "query cancelled" when it runs past the server's time limit: narrow it, or add an index.
-- DDL inside a transaction: a plain CREATE TABLE rolls back with it; the server refuses the other DDL there because CREATE TABLE ... AS SELECT, ALTER, CREATE INDEX and CREATE VIEW would persist after ROLLBACK, and DROP TABLE and TRUNCATE would lose rows.
-- Results are JSON: INTEGER values past 2^53 lose digits, so read them with CAST(x AS TEXT) and pass them as string parameters. TIMESTAMP values come back to the millisecond; CAST(ts AS TEXT) gives all nine digits.
+- DDL inside a transaction: CREATE TABLE, with or without AS SELECT, rolls back with it; the server refuses the other DDL there because ALTER, CREATE INDEX and CREATE VIEW would persist after ROLLBACK and DROP TABLE would lose rows. TRUNCATE cannot run in a transaction; use DELETE.
+- Results are JSON: an INTEGER of magnitude 2^53 or more comes back as a string holding its exact digits; pass such values as string parameters, and use CAST($1 AS INTEGER) when doing arithmetic on one (a TEXT parameter in arithmetic gives NULL). TIMESTAMP values come back to the millisecond; CAST(ts AS TEXT) gives all nine digits.
 
-Not supported: stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, MERGE, UPDATE ... FROM, composite foreign keys, GROUPS window frames, EXCLUDE, two named windows in one WINDOW clause, JSON_SET and other JSON modifiers, a statement that is only VALUES (...).
+Not supported: stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, MERGE, UPDATE ... FROM, composite foreign keys, GROUPS window frames, EXCLUDE, JSON_SET and other JSON modifiers, a statement that is only VALUES (...).
 
 Read stoolap://sql-reference or attach the "sql-assistant" prompt for the full reference with the live schema.`;
 
@@ -52,7 +53,7 @@ ARRAY_AGG(expr) - JSON array; NULL for no rows
 STDDEV / STDDEV_SAMP, VARIANCE / VAR_SAMP - sample (N-1); STDDEV_POP, VAR_POP - population (N)
 
 Every aggregate takes DISTINCT and FILTER (WHERE cond) and works as a window function with OVER.
-GROUP BY ROLLUP(a, b), CUBE(a, b), GROUPING SETS((a, b), (a), ()); GROUPING(col) is 1 on super-aggregate rows.`,
+GROUP BY ROLLUP(a, b), CUBE(a, b), GROUPING SETS((a, b), (a), ()); GROUPING(col) is 1 on super-aggregate rows. GROUPING(a, b) gives one bit per argument, the first most significant (GROUPING(a) * 2 + GROUPING(b)). GROUPING() also works inside expressions, HAVING and ORDER BY.`,
 
   window: `## Window Functions
 ROW_NUMBER(), RANK(), DENSE_RANK(), NTILE(n)
@@ -61,7 +62,7 @@ FIRST_VALUE(expr), LAST_VALUE(expr), NTH_VALUE(expr, n)
 PERCENT_RANK(), CUME_DIST()
 
 OVER ([PARTITION BY cols] [ORDER BY cols [NULLS FIRST|LAST]] [ROWS | RANGE BETWEEN ... AND ...])
-Named window: WINDOW w AS (...), used as OVER w or OVER (w ORDER BY ...). One named window per WINDOW clause.
+Named windows: WINDOW w AS (...), v AS (...), used as OVER w or OVER (w ORDER BY ...).
 Not supported: GROUPS frames, EXCLUDE.`,
 
   string: `## String Functions
@@ -84,7 +85,7 @@ MOD(x, y) or x % y - keeps the fraction: MOD(-7.5, 2) = -1.5
 POWER / POW, SQRT, EXP, LN, LOG(x) (base 10), LOG(base, x), LOG10, LOG2
 PI(), RANDOM() (float in [0, 1)), SIN, COS, TAN (radians)
 
-Arithmetic + - * / %; bitwise & | ^ ~ << >> (shift count 0-63). INTEGER overflow, ABS and negation of the minimum included, is an error. Division by zero is NULL.`,
+Arithmetic + - * / %; bitwise & | ^ ~ << >> (shift count 0-63). INTEGER overflow, ABS and negation of the minimum included, is an error. FLOAT arithmetic whose finite operands give an infinite result is an error, and so is a FLOAT SUM or AVG past the range. Division by zero is NULL.`,
 
   datetime: `## Date/Time Functions
 NOW() / CURRENT_TIMESTAMP (UTC), CURRENT_DATE, CURRENT_TIME
@@ -145,24 +146,24 @@ INTEGER (64-bit), FLOAT (64-bit), TEXT (UTF-8), BOOLEAN, TIMESTAMP (UTC, ns), JS
 No BLOB, ARRAY, ENUM, DATE-only or INTERVAL column types. A single-column PRIMARY KEY must be INTEGER.
 
 ### Statements
-- SELECT [DISTINCT [ON (exprs)]] ... FROM t [AS a] [AS OF TIMESTAMP '...' | AS OF TRANSACTION n] [JOIN ...] [WHERE] [GROUP BY ... | ROLLUP | CUBE | GROUPING SETS] [HAVING] [WINDOW w AS (...)] [ORDER BY ... [NULLS FIRST|LAST]] [LIMIT n [OFFSET m]]
+- SELECT [DISTINCT [ON (exprs)]] ... FROM t [AS a] [AS OF TIMESTAMP '...' | AS OF TRANSACTION n] [JOIN ...] [WHERE] [GROUP BY ... | ROLLUP | CUBE | GROUPING SETS] [HAVING] [WINDOW w AS (...), ...] [ORDER BY ... [NULLS FIRST|LAST]] [LIMIT n [OFFSET m]]
 - Set operations UNION [ALL], INTERSECT [ALL], EXCEPT [ALL]; INTERSECT binds tighter. ORDER BY / LIMIT apply to the whole result.
 - INSERT INTO t [(cols)] VALUES (...), ... | SELECT ... [ON CONFLICT [(cols)] DO UPDATE SET c = EXCLUDED.c [WHERE ...] | DO NOTHING] [RETURNING ...]
-- ON DUPLICATE KEY UPDATE c = EXCLUDED.c is also accepted. ON CONFLICT DO UPDATE refuses to touch one row twice in a statement.
+- ON DUPLICATE KEY UPDATE c = EXCLUDED.c is also accepted and updates a row met twice again. ON CONFLICT DO UPDATE refuses to touch one row twice in a statement.
 - UPDATE t SET c = expr, ... [WHERE] [RETURNING]. An INTEGER primary key can be updated (ON UPDATE CASCADE follows). No UPDATE ... FROM.
 - DELETE FROM t [WHERE] [RETURNING]
-- WITH [RECURSIVE] ... before SELECT, INSERT, UPDATE, DELETE, and inside subqueries. Recursive CTEs take UNION ALL only and stop silently after 10,000 iterations.
+- WITH [RECURSIVE] ... before SELECT, INSERT, UPDATE, DELETE, and inside subqueries. A CTE that reads itself takes UNION ALL only, no ORDER BY, LIMIT or OFFSET (end it with WHERE), and fails if it still adds rows after 10,000 iterations.
 - TRUNCATE TABLE t; COPY t [(cols)] FROM '/path' WITH (FORMAT CSV | JSON, HEADER true, DELIMITER ',', NULL '') reads a file on the server host.
 - Subqueries: scalar, IN, EXISTS, ANY/SOME/ALL, row comparisons (a, b) IN (SELECT x, y ...), correlated (also in JOIN ON), derived tables.
 - Joins: INNER, LEFT, RIGHT, FULL, CROSS, NATURAL, ON or USING.
 - Writing one column twice in an INSERT column list or an UPDATE SET is an error. Text after a complete statement is a parse error.
 
 ### DDL
-- CREATE TABLE [IF NOT EXISTS] t (col type [PRIMARY KEY] [AUTO_INCREMENT] [NOT NULL] [UNIQUE] [DEFAULT v] [CHECK (...)] [REFERENCES p(col) [ON DELETE|UPDATE CASCADE | SET NULL | RESTRICT | NO ACTION]], ..., [PRIMARY KEY (a, b)], [CHECK (...)], [FOREIGN KEY (c) REFERENCES p(col)]) [CLUSTER BY (cols)]
-- CREATE TABLE t AS SELECT ...
+- CREATE TABLE [IF NOT EXISTS] t (col type [PRIMARY KEY] [AUTO_INCREMENT] [NOT NULL] [UNIQUE] [DEFAULT v] [CHECK (...)] [REFERENCES p(col) [ON DELETE|UPDATE CASCADE | SET NULL | RESTRICT | NO ACTION]], ..., [PRIMARY KEY (a, b)], [CHECK (...)], [FOREIGN KEY (c) REFERENCES p(col)]) [CLUSTER BY (cols)]. One PRIMARY KEY per table; one DEFAULT and one CHECK per column.
+- CREATE TABLE t AS SELECT ... - fails as a whole, leaving no table, when a row does not fit its column's type
 - Foreign keys are single-column; self-references are allowed. DROP TABLE is refused while another table references it, unless DROP TABLE t CASCADE.
-- ALTER TABLE t ADD COLUMN c type [DEFAULT v] | DROP COLUMN c | RENAME COLUMN a TO b | MODIFY COLUMN c type [NOT NULL] | RENAME TO n | CLUSTER BY (cols) | DROP CLUSTER BY | AUTO_INCREMENT = n
-- MODIFY COLUMN converts existing rows and refuses a change that breaks NOT NULL or UNIQUE. ADD COLUMN takes no CHECK, UNIQUE, PRIMARY KEY, AUTO_INCREMENT or REFERENCES.
+- ALTER TABLE t ADD COLUMN c type [NOT NULL] [DEFAULT v] [CHECK (...)] | DROP COLUMN c | RENAME COLUMN a TO b | MODIFY COLUMN c type [NOT NULL] [DEFAULT v] [CHECK (...)] | ALTER [COLUMN] c DROP DEFAULT | ALTER [COLUMN] c DROP CHECK | RENAME TO n | CLUSTER BY (cols) | DROP CLUSTER BY | AUTO_INCREMENT = n
+- ADD COLUMN and MODIFY COLUMN run a CHECK over every existing row first and refuse the statement if one fails. MODIFY COLUMN converts existing rows, refuses a change that breaks NOT NULL or UNIQUE, and keeps the DEFAULT and CHECK it does not restate; NOT NULL is dropped unless restated. Neither takes UNIQUE, PRIMARY KEY, AUTO_INCREMENT or REFERENCES.
 - CREATE [UNIQUE] INDEX [IF NOT EXISTS] i ON t(a [, b]) [USING BTREE | HASH | BITMAP | HNSW] [WITH (...)]; DROP INDEX [IF EXISTS] i ON t
 - Default index type: BTREE for INTEGER, FLOAT, TIMESTAMP and TEXT; HASH for JSON; BITMAP for BOOLEAN; HNSW for VECTOR. One index per column.
 - CREATE VIEW [IF NOT EXISTS] v AS SELECT ...; DROP VIEW [IF EXISTS] v. Views are read-only and take no parameters or AS OF.
@@ -171,16 +172,16 @@ No BLOB, ARRAY, ENUM, DATE-only or INTERVAL column types. A single-column PRIMAR
 - begin_transaction with READ COMMITTED (default: each statement sees the latest commits) or SNAPSHOT (the view at BEGIN).
 - savepoint create / rollback_to (keeps the savepoint) / release (drops it and later ones).
 - A failed statement is undone and leaves the transaction open. Unique violations are reported when the statement ends.
-- Inside a transaction a plain CREATE TABLE rolls back; CREATE TABLE ... AS SELECT, ALTER TABLE, CREATE INDEX and CREATE VIEW would persist and TRUNCATE and DROP TABLE would lose rows, so the server refuses them. COPY and VACUUM are refused by the engine.
+- Inside a transaction CREATE TABLE, with or without AS SELECT, rolls back; ALTER TABLE, CREATE INDEX and CREATE VIEW would persist and DROP TABLE would lose rows, so the server refuses them. TRUNCATE, COPY and VACUUM are refused by the engine; use DELETE to empty a table there.
 
 ### Temporal queries
 SELECT ... FROM t AS OF TIMESTAMP '...' | AS OF TRANSACTION n, also in joins and subqueries. All AS OF clauses resolve against the statement's start. Points older than the history kept (VACUUM, TRUNCATE, sealing and compaction cut it) give an error.
 
 ### Errors instead of guesses
-Unknown or ambiguous columns and qualifiers, a missing parameter, mixing $n and :name, a fractional LIMIT and INTEGER overflow are errors. A runtime error fails the whole statement wherever it occurs.
+Unknown or ambiguous columns and qualifiers, a missing parameter, mixing $n and :name, a fractional LIMIT, a FLOAT or TEXT condition, and INTEGER or FLOAT overflow are errors. A runtime error fails the whole statement wherever it occurs.
 
 ### Metadata and plans
-SHOW TABLES, SHOW VIEWS, SHOW INDEXES FROM t, SHOW CREATE TABLE t, SHOW CREATE VIEW v, DESCRIBE t.
+SHOW TABLES, SHOW VIEWS, SHOW INDEXES FROM t, SHOW CREATE TABLE t, SHOW CREATE VIEW v, DESCRIBE t (Extra shows auto_increment and the column's CHECK; table CHECKs and foreign key targets only in SHOW CREATE TABLE).
 EXPLAIN prints one plan step per row (column "plan"). A line starting with "else" is the fallback used when the step above cannot run. EXPLAIN ANALYZE runs the statement, adds (actual time=..., rows=...) to the top line and ends with "Paths: ..." naming the paths taken.
 ANALYZE t collects optimizer statistics into the tables _sys_table_stats and _sys_column_stats; do not write to them. VACUUM [t] removes deleted rows and old versions and discards AS OF history.
 
@@ -194,4 +195,4 @@ ANALYZE t collects optimizer statistics into the tables _sys_table_stats and _sy
 Recent rows live in a row store; checkpoints seal older rows into compressed column volumes. Single-column BTREE indexes on INTEGER, FLOAT, TIMESTAMP or TEXT, and HASH indexes on TEXT, also reach sealed rows; other indexes on sealed rows fall back to pruned scans. If a volume file is damaged or missing, statements on that table fail with an error naming it, and other tables keep working.
 
 ### Not supported
-Stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, LISTEN/NOTIFY, MERGE, UPDATE ... FROM, composite foreign keys, GROUPS frames, EXCLUDE, two named windows in one WINDOW clause, JSON modifier functions, the :: cast, START TRANSACTION, a statement that is only VALUES (...) or TABLE t, compound interval literals.`;
+Stored procedures, triggers, user-defined functions, GRANT/REVOKE, full-text search, materialized views, LISTEN/NOTIFY, MERGE, UPDATE ... FROM, composite foreign keys, GROUPS frames, EXCLUDE, JSON modifier functions, the :: cast, START TRANSACTION, a statement that is only VALUES (...) or TABLE t, compound interval literals.`;
